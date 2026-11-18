@@ -1,0 +1,72 @@
+name: Build VLC WebAssembly
+
+# Rebuilds site/vlc/ (VLC + libdvdnav/libdvdread/libdvdcss + FFmpeg compiled
+# to WebAssembly) from source with build/build.sh, runs the end-to-end test
+# against a generated DVD image, and optionally commits the result.
+#
+# A full build takes roughly 1-2 hours; the contribs and VLC build tree are
+# cached between runs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Commit the rebuilt engine (site/vlc) to this branch"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git curl python3 build-essential autoconf automake libtool libtool-bin \
+            pkg-config gettext autopoint ragel flex bison help2man meson ninja-build \
+            nasm gperf ant cmake \
+            ffmpeg dvdauthor imagemagick genisoimage fonts-dejavu-core
+
+      - name: Restore build cache
+        uses: actions/cache@v4
+        with:
+          path: build/work
+          key: vlc-wasm-${{ hashFiles('build/build.sh', 'build/patches/**') }}
+          restore-keys: vlc-wasm-
+
+      - name: Build
+        run: build/build.sh
+
+      - name: Generate a test DVD image
+        run: tools/make-test-dvd.sh "$RUNNER_TEMP/test-dvd.iso"
+
+      - name: End-to-end test (headless Chromium)
+        run: |
+          npm install --no-save playwright@1
+          npx playwright install --with-deps chromium
+          node tools/e2e-test.js "$RUNNER_TEMP/test-dvd.iso"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vlc-wasm
+          path: site/vlc
+
+      - name: Commit the rebuilt engine
+        if: ${{ inputs.commit }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add site/vlc
+          if git diff --cached --quiet; then
+            echo "Engine unchanged."
+          else
+            git commit -m "Rebuild VLC WebAssembly engine"
+            git push
+          fi

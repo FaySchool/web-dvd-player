@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Web DVD Player</title>
+  <meta name="description" content="Play DVD disc images (.iso / .cdr) in the browser with full DVD menus, powered by VLC compiled to WebAssembly.">
+  <!-- GitHub Pages cannot send COOP/COEP headers; this service worker adds
+       them so SharedArrayBuffer (needed by VLC's WebAssembly threads) works. -->
+  <script src="coi-serviceworker.js"></script>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%23d9d9e3'/%3E%3Ccircle cx='32' cy='32' r='9' fill='%23333'/%3E%3Ccircle cx='32' cy='32' r='4' fill='%23fff'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-disc" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="30"/><circle cx="32" cy="32" r="9" class="hole"/></svg>
+      <span>Web DVD Player</span>
+    </div>
+    <div class="topbar-actions">
+      <button id="btn-open" class="btn" type="button">Open disc image…</button>
+      <button id="btn-help" class="btn ghost" type="button" aria-haspopup="dialog">Shortcuts</button>
+    </div>
+    <input id="file-input" type="file" accept=".iso,.cdr,.img,.toast,.udf,application/x-iso9660-image" hidden>
+  </header>
+
+  <main>
+    <section id="stage" class="stage" tabindex="0" aria-label="DVD screen">
+      <canvas id="canvas" width="1280" height="720"></canvas>
+
+      <div id="dropzone" class="overlay dropzone">
+        <div class="dropzone-inner">
+          <svg viewBox="0 0 64 64" class="big-disc" aria-hidden="true"><circle cx="32" cy="32" r="30"/><circle cx="32" cy="32" r="9" class="hole"/></svg>
+          <h1>Insert a disc</h1>
+          <p>Drop a DVD image (<code>.iso</code> or <code>.cdr</code>) here, or</p>
+          <button id="btn-open-2" class="btn primary" type="button">Choose a file</button>
+          <p class="fine">The file is read directly from your computer. Nothing is uploaded.</p>
+        </div>
+      </div>
+
+      <div id="loading" class="overlay loading hidden" role="status" aria-live="polite">
+        <div class="spinner" aria-hidden="true"></div>
+        <p id="loading-text">Loading VLC engine…</p>
+      </div>
+
+      <div id="error" class="overlay error hidden" role="alert">
+        <div>
+          <h2 id="error-title">Something went wrong</h2>
+          <p id="error-text"></p>
+        </div>
+      </div>
+
+      <div id="osd" class="osd" aria-live="polite"></div>
+    </section>
+
+    <section class="controls" aria-label="Player controls">
+      <div class="seek-row">
+        <span id="time-cur" class="time">0:00</span>
+        <input id="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek" disabled>
+        <span id="time-len" class="time">0:00</span>
+      </div>
+
+      <div class="panel">
+        <div class="group transport">
+          <button class="icon-btn" data-action="prev-chapter" title="Previous chapter (PageUp)" aria-label="Previous chapter">
+            <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zM9.5 12l8.5 6V6z"/></svg>
+          </button>
+          <button class="icon-btn" data-action="rewind" title="Back 10 s (J)" aria-label="Back 10 seconds">
+            <svg viewBox="0 0 24 24"><path d="M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z"/></svg>
+          </button>
+          <button class="icon-btn big" id="btn-play" data-action="play-pause" title="Play / Pause (Space)" aria-label="Play or pause">
+            <svg viewBox="0 0 24 24" class="ico-play"><path d="M8 5v14l11-7z"/></svg>
+            <svg viewBox="0 0 24 24" class="ico-pause"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+          </button>
+          <button class="icon-btn" data-action="forward" title="Forward 10 s (L)" aria-label="Forward 10 seconds">
+            <svg viewBox="0 0 24 24"><path d="M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z"/></svg>
+          </button>
+          <button class="icon-btn" data-action="next-chapter" title="Next chapter (PageDown)" aria-label="Next chapter">
+            <svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+          </button>
+          <button class="icon-btn" data-action="stop" title="Eject" aria-label="Eject">
+            <svg viewBox="0 0 24 24"><path d="M5 17h14v2H5zm7-12L5.33 15h13.34z"/></svg>
+          </button>
+        </div>
+
+        <div class="group remote" aria-label="DVD remote">
+          <div class="menu-buttons">
+            <button class="btn small" data-action="menu" title="Disc menu (M)">Menu</button>
+            <button class="btn small" data-action="title-menu" title="Title menu (T)">Title</button>
+            <button class="btn small" data-action="resume" title="Leave the menu and resume playback (Backspace)">Resume</button>
+          </div>
+          <div class="dpad">
+            <button class="dpad-btn up" data-action="up" aria-label="Up">▲</button>
+            <button class="dpad-btn left" data-action="left" aria-label="Left">◀</button>
+            <button class="dpad-btn ok" data-action="activate" aria-label="OK / Enter">OK</button>
+            <button class="dpad-btn right" data-action="right" aria-label="Right">▶</button>
+            <button class="dpad-btn down" data-action="down" aria-label="Down">▼</button>
+          </div>
+        </div>
+
+        <div class="group selectors">
+          <label>Title
+            <select id="sel-title" disabled></select>
+          </label>
+          <label>Chapter
+            <select id="sel-chapter" disabled></select>
+          </label>
+          <label>Audio
+            <select id="sel-audio" disabled></select>
+          </label>
+          <label>Subtitles
+            <select id="sel-spu" disabled></select>
+          </label>
+        </div>
+
+        <div class="group misc">
+          <label class="volume">
+            <button class="icon-btn" id="btn-mute" data-action="mute" title="Mute (V)" aria-label="Mute">
+              <svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 8v8a4.5 4.5 0 0 0 2.5-4z"/></svg>
+            </button>
+            <input id="volume" type="range" min="0" max="125" value="100" aria-label="Volume">
+          </label>
+          <label>Deinterlace
+            <select id="sel-deint">
+              <option value="">Off</option>
+              <option value="blend" selected>Blend</option>
+              <option value="bob">Bob</option>
+              <option value="linear">Linear</option>
+              <option value="yadif">Yadif</option>
+              <option value="yadif2x">Yadif 2x</option>
+            </select>
+          </label>
+          <button class="icon-btn" data-action="fullscreen" title="Fullscreen (F)" aria-label="Fullscreen">
+            <svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+          </button>
+        </div>
+      </div>
+      <p id="status" class="status">Engine not loaded yet.</p>
+    </section>
+  </main>
+
+  <dialog id="help">
+    <h2>Keyboard shortcuts</h2>
+    <table>
+      <tr><td><kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd></td><td>Move between menu buttons</td></tr>
+      <tr><td><kbd>Enter</kbd></td><td>Select the highlighted menu button</td></tr>
+      <tr><td><kbd>M</kbd></td><td>Menu (root menu of the current title)</td></tr>
+      <tr><td><kbd>T</kbd></td><td>Title / top menu of the disc</td></tr>
+      <tr><td><kbd>Backspace</kbd> <kbd>Esc</kbd></td><td>Leave the menu and resume playback</td></tr>
+      <tr><td><kbd>Space</kbd></td><td>Play / pause</td></tr>
+      <tr><td><kbd>PageUp</kbd> <kbd>PageDown</kbd></td><td>Previous / next chapter</td></tr>
+      <tr><td><kbd>J</kbd> <kbd>L</kbd></td><td>Back / forward 10 seconds</td></tr>
+      <tr><td><kbd>F</kbd></td><td>Fullscreen</td></tr>
+      <tr><td><kbd>V</kbd></td><td>Mute</td></tr>
+    </table>
+    <p>You can also click menu buttons directly on the picture.</p>
+    <form method="dialog"><button class="btn primary">Close</button></form>
+  </dialog>
+
+  <footer class="footer">
+    Powered by <a href="https://www.videolan.org/vlc/" rel="noopener">VLC</a> (libVLC, libdvdnav, libdvdread, libdvdcss, FFmpeg) compiled to WebAssembly.
+    Licensed under the GPL — <a href="https://github.com/a-semani-fay/web-dvd-player" rel="noopener">source code</a>.
+  </footer>
+
+  <script src="vlc/dvdplayer.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
