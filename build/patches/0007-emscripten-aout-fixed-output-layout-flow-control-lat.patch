@@ -1,7 +1,7 @@
-From 020ed5bc5aa5a4baedf4fec54a231091708983a8 Mon Sep 17 00:00:00 2001
+From a9252e9f5795bcb6e5de00980b9e1c81fa917b7e Mon Sep 17 00:00:00 2001
 From: web-dvd-player <web-dvd-player@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 18:25:01 +0000
-Subject: [PATCH 7/8] emscripten aout: fixed output layout, flow control,
+Subject: [PATCH 7/9] emscripten aout: fixed output layout, flow control,
  latency, pause
 
 - The AudioContext/worklet is created once with the first stream's
@@ -12,20 +12,35 @@ Subject: [PATCH 7/8] emscripten aout: fixed output layout, flow control,
 - Never overwrite samples that were not rendered yet: wait for space in
   the ring buffer (dropping only if the AudioContext is not running).
 - Report the queued duration in time_get so that the core keeps audio in
-  sync and corrects clock drift.
+  sync and corrects clock drift. The browser renders in bursts, so the
+  raw queue size is jittery and, audio being the master clock, made the
+  video stutter: report a smoothed estimate instead.
 - Pause outputs silence and keeps the queued samples instead of
   discarding them.
 ---
- modules/audio_output/emscripten.c             | 161 +++++++++++-------
+ modules/audio_output/emscripten.c             | 204 +++++++++++++-----
  .../webaudio/audio-worklet-processor.js       |   3 +
  modules/audio_output/webaudio/webaudio.js     |   9 +-
- 3 files changed, 114 insertions(+), 59 deletions(-)
+ 3 files changed, 157 insertions(+), 59 deletions(-)
 
 diff --git a/modules/audio_output/emscripten.c b/modules/audio_output/emscripten.c
-index 8819c34..e950482 100644
+index 8819c34..e76b762 100644
 --- a/modules/audio_output/emscripten.c
 +++ b/modules/audio_output/emscripten.c
-@@ -72,16 +72,22 @@ typedef struct aout_sys_t
+@@ -65,6 +65,12 @@ typedef struct aout_sys_t
+     */
+     atomic_uint init;
+ 
++    /* Latency estimation (see Time_Get) */
++    uint64_t written_frames;  /* frames queued since the last flush */
++    double   played_est;      /* smoothed estimate of the frames rendered */
++    vlc_tick_t est_date;
++    bool     est_valid;
++
+     // required by volume.h
+     bool soft_mute;
+     float soft_gain;
+@@ -72,16 +78,24 @@ typedef struct aout_sys_t
  
  #include "volume.h"
  
@@ -51,10 +66,12 @@ index 8819c34..e950482 100644
 -    atomic_store(&sys->sab->head, 0);
 -    atomic_store(&sys->sab->tail, 0);
 +    atomic_store(&sys->sab->head, atomic_load(&sys->sab->tail));
++    sys->written_frames = 0;
++    sys->est_valid = false;
  }
  
  static void Play(audio_output_t *aout, block_t *block, vlc_tick_t date)
-@@ -89,20 +95,45 @@ static void Play(audio_output_t *aout, block_t *block, vlc_tick_t date)
+@@ -89,20 +103,46 @@ static void Play(audio_output_t *aout, block_t *block, vlc_tick_t date)
      VLC_UNUSED(date);
      aout_sys_t *sys = (aout_sys_t *) aout->sys;
      int8_t *data = (int8_t *) block->p_buffer;
@@ -106,6 +123,7 @@ index 8819c34..e950482 100644
 +
 +        size_t chunk = remaining < free_bytes ? remaining : free_bytes;
 +        webaudio_worklet_push(sys->sab, data, chunk);
++        sys->written_frames += chunk / frame_bytes;
 +        data += chunk;
 +        remaining -= chunk;
      }
@@ -113,7 +131,7 @@ index 8819c34..e950482 100644
      block_Release(block);
  }
  
-@@ -111,16 +142,25 @@ static void Pause(audio_output_t *aout, bool paused, vlc_tick_t date)
+@@ -111,16 +151,59 @@ static void Pause(audio_output_t *aout, bool paused, vlc_tick_t date)
      VLC_UNUSED(date);
      aout_sys_t * sys = (aout_sys_t *) aout->sys;
  
@@ -125,12 +143,20 @@ index 8819c34..e950482 100644
 +    /* The worklet outputs silence while paused and keeps the queued
 +     * samples, so that playback resumes seamlessly. */
 +    atomic_store(&sys->sab->is_paused, paused ? 1 : 0);
++    sys->est_valid = false;
  }
  
 +/*
 +  Report how long the queued samples will take to be rendered, so that the
-+  audio output core can keep audio in sync with the clock (and correct
-+  drift between the AudioContext clock and the system clock).
++  audio output core keeps audio in sync with the clock and corrects the
++  drift between the AudioContext clock and the system clock.
++
++  The browser renders audio in bursts (several 128-frame quanta at once), so
++  the raw amount of queued samples jumps by tens of milliseconds. Since the
++  audio drives the playback clock, reporting it directly makes the clock,
++  and thus the video, stutter (frames are dropped as "late"). Instead,
++  model the rendering position as advancing at the nominal rate and slowly
++  correct it toward the measured one.
 +*/
  static int Time_Get(audio_output_t *aout, vlc_tick_t *delay)
  {
@@ -139,13 +165,39 @@ index 8819c34..e950482 100644
 +
 +    if (sys->channels == 0 || sys->sample_rate == 0)
 +        return -1;
-+    uint32_t frames = QueuedBytes(sys->sab) / (sys->channels * sizeof(float));
-+    *delay = vlc_tick_from_samples(frames, sys->sample_rate);
++
++    const uint32_t frame_bytes = sys->channels * sizeof(float);
++    const double rate = sys->sample_rate;
++    uint64_t queued = QueuedBytes(sys->sab) / frame_bytes;
++    uint64_t written = sys->written_frames;
++    double played = written > queued ? (double)(written - queued) : 0.;
++    vlc_tick_t now = vlc_tick_now();
++
++    if (!sys->est_valid || atomic_load(&sys->sab->is_paused))
++    {
++        sys->played_est = played;
++        sys->est_valid = true;
++    }
++    else
++    {
++        sys->played_est += (double)(now - sys->est_date) * rate / CLOCK_FREQ;
++        double err = played - sys->played_est;
++        if (err > rate / 4 || err < -rate / 4)
++            sys->played_est = played; /* discontinuity: underrun, stall... */
++        else
++            sys->played_est += err * 0.01;
++    }
++    if (sys->played_est > (double) written)
++        sys->played_est = written;
++    sys->est_date = now;
++
++    *delay = vlc_tick_from_samples(written - (uint64_t) sys->played_est,
++                                   sys->sample_rate);
 +    return 0;
  }
  
  static void Close(vlc_object_t *obj)
-@@ -138,9 +178,9 @@ static void Close(vlc_object_t *obj)
+@@ -138,9 +221,9 @@ static void Close(vlc_object_t *obj)
  */
  static void Stop(audio_output_t *aout)
  {
@@ -156,7 +208,7 @@ index 8819c34..e950482 100644
  }
  
  /*
-@@ -156,7 +196,12 @@ static void Init(void *userData)
+@@ -156,7 +239,12 @@ static void Init(void *userData)
      audio_output_t *aout = (audio_output_t *) userData;
      aout_sys_t *sys = (aout_sys_t *) aout->sys;
  
@@ -170,7 +222,7 @@ index 8819c34..e950482 100644
      unsigned rate = webaudio_getSampleRate();
      unsigned channels = webaudio_getChannels();
  
-@@ -184,7 +229,7 @@ static int Start(audio_output_t *aout, audio_sample_format_t *restrict fmt)
+@@ -184,7 +272,7 @@ static int Start(audio_output_t *aout, audio_sample_format_t *restrict fmt)
      aout_SoftVolumeStart(aout);
      if (( nbChannels == 0 ) || !AOUT_FMT_LINEAR(fmt))
          return VLC_EGENERIC;
@@ -179,7 +231,7 @@ index 8819c34..e950482 100644
      if (atomic_load(&sys->init) == false) {
          sys->channels = nbChannels;
          sys->sample_rate = fmt->i_rate;
-@@ -200,38 +245,40 @@ static int Start(audio_output_t *aout, audio_sample_format_t *restrict fmt)
+@@ -200,38 +288,40 @@ static int Start(audio_output_t *aout, audio_sample_format_t *restrict fmt)
  
          // Wait until initialization ended.
          vlc_atomic_wait(&sys->init, 0);

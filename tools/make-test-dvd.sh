@@ -5,6 +5,10 @@
 #   - Title 1: 30 s, 3 chapters, AC-3 stereo audio, a subtitle track
 #   - Title 2: 10 s, mono AC-3 192 kbps audio (like many TV-special DVDs)
 #   - Title 3: 10 s, 5.1 AC-3 448 kbps audio (only reachable from the title list)
+#   - Title 4: mimics structure-based copy protection: its program chain is
+#     REAL-A (blue, 10 s) / DECOY (red, 10 s) / REAL-B (green, 10 s), and a
+#     cell command after REAL-A jumps over the decoy. Normal playback never
+#     shows the decoy; a naive linear seek lands in it.
 #   - When a title ends, playback returns to the menu
 #
 # Requires: ffmpeg, dvdauthor (with spumux), imagemagick (convert), genisoimage
@@ -90,6 +94,16 @@ ffmpeg -loglevel error -y \
     -af "pan=5.1|FL=c0|FR=c0|FC=c0|LFE=c0|BL=c0|BR=c0" \
     -target ntsc-dvd -aspect 16:9 -b:v 5000k -c:a ac3 -b:a 448k title3.mpg
 
+# Title 4: decoy cell skipped by navigation commands
+for part in "blue 440 REAL-A t4a" "red 220 DECOY t4d" "green 660 REAL-B t4b"; do
+    set -- $part
+    ffmpeg -loglevel error -y \
+        -f lavfi -i "color=c=$1:size=720x480:rate=30000/1001:duration=10" \
+        -f lavfi -i "sine=frequency=$2:sample_rate=48000:duration=10" \
+        -vf "drawtext=text='$3  %{pts\\:hms}':fontcolor=white:fontsize=48:x=(w-tw)/2:y=(h-th)/2" \
+        -target ntsc-dvd -aspect 4:3 -b:v 3000k -c:a ac3 -b:a 192k -ac 2 "$4.mpg"
+done
+
 # -------------------------------------------------------------- author ----
 cat > dvd.xml <<'EOF'
 <dvdauthor dest="dvd" jumppad="yes">
@@ -148,6 +162,24 @@ cat > dvd.xml <<'EOF'
       <audio format="ac3" channels="6" lang="en"/>
       <pgc>
         <vob file="title3.mpg"/>
+        <post>call vmgm menu;</post>
+      </pgc>
+    </titles>
+  </titleset>
+  <titleset>
+    <menus>
+      <video format="ntsc" aspect="4:3"/>
+      <pgc entry="root">
+        <pre>jump vmgm menu 1;</pre>
+      </pgc>
+    </menus>
+    <titles>
+      <video format="ntsc" aspect="4:3"/>
+      <audio format="ac3" lang="en"/>
+      <pgc>
+        <vob file="t4a.mpg"><cell start="0" chapter="1">jump cell 3;</cell></vob>
+        <vob file="t4d.mpg"><cell start="0" program="1"/></vob>
+        <vob file="t4b.mpg"><cell start="0" chapter="1"/></vob>
         <post>call vmgm menu;</post>
       </pgc>
     </titles>

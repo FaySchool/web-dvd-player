@@ -16,6 +16,13 @@ is never loaded into memory as a whole, so dual-layer (> 4 GB) images work.
   navigation commands are handled by libdvdnav, exactly as in desktop VLC.
 - **Menu / Title (top) menu / Resume** buttons, like a remote control.
 - Titles and chapters (previous/next, pick from a list), seeking, pause, ±10 s.
+- **Protection-aware seeking**: some discs hide decoy cells (junk or
+  unreadable video) inside a title, which normal playback skips through the
+  disc's own navigation commands, but a plain seek can land in. Seeking, the
+  seek bar and the displayed duration follow the cells that playback really
+  goes through: the title's navigation program is replayed from its start on
+  a copy of the player state (like fast-forwarding through the disc's logic,
+  without decoding video), and the player jumps to the resulting state.
 - Audio track and subtitle selection (DVD sub-pictures, including menu
   highlights), volume/mute, deinterlacing, fullscreen.
 - MPEG-2 video; AC-3, MPEG audio, LPCM and DTS audio (FFmpeg).
@@ -116,9 +123,13 @@ Patches on top of VLC + vlc.js (`build/patches/`):
 7. Audio output: a fixed stereo output that every stream is converted to
    (mono, 5.1 and other layouts used to come out garbled whenever they
    differed from the first stream), proper ring-buffer flow control, latency
-   reporting for A/V sync, and pause without dropping audio.
+   reporting for A/V sync (smoothed, as the browser renders audio in bursts
+   and a jittery audio clock made the video stutter), and pause without
+   dropping audio.
 8. dvdnav: execute mouse clicks on menu buttons on the demux thread (they
    could deadlock playback when run on the video output thread).
+9. libdvdnav + dvdnav: seek along the real playback path of titles
+   (`dvdnav_safe_time_search()`), so seeking never lands in decoy cells.
 
 ### Building locally
 
@@ -134,12 +145,13 @@ build/build.sh link     # only relink after editing build/src/dvdplayer.c
 ### Testing
 
 `tools/make-test-dvd.sh` authors a small DVD-Video image with a real menu (two
-buttons, three titles, chapters, stereo, mono and 5.1 AC-3 audio, a subtitle
-track) using ffmpeg, dvdauthor, ImageMagick and genisoimage. `tools/e2e-test.js`
+buttons, four titles, chapters, stereo, mono and 5.1 AC-3 audio, a subtitle
+track, and a title with a decoy cell skipped by a cell command, like
+structure-protected discs) using ffmpeg, dvdauthor, ImageMagick and genisoimage. `tools/e2e-test.js`
 drives the player in headless Chromium against it (menu clicks, title end →
-menu, title and chapter changes, subtitles, pause, Menu/Resume, eject/re-open)
-and analyses the audio output of each title's test tone to check it is
-undistorted:
+menu, title and chapter changes, subtitles, pause, Menu/Resume, eject/re-open,
+seeking past the decoy cell) and analyses the audio output of each title's
+test tone to check it is undistorted:
 
 ```bash
 tools/make-test-dvd.sh /tmp/test-dvd.iso

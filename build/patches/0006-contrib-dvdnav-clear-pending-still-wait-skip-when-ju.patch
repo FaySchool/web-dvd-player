@@ -1,7 +1,7 @@
 From 68d0f43ddfd805328ddb904595c9078677a0cce2 Mon Sep 17 00:00:00 2001
 From: web-dvd-player <web-dvd-player@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 17:36:51 +0000
-Subject: [PATCH 6/8] contrib: dvdnav: clear pending still/wait skip when
+Subject: [PATCH 6/9] contrib: dvdnav: clear pending still/wait skip when
  jumping
 
 VLC calls dvdnav_still_skip() before dvdnav_title_play()/part_play(). The

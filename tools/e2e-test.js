@@ -208,6 +208,32 @@ function check(name, ok, detail) {
       check(`${t.layout} audio is clean (title ${t.title})`, worst && !worst.bad,
         worst && `${worst.hz.toFixed(0)} Hz, jump ${worst.jump.toFixed(3)}`);
     }
+
+    // Title 4 hides a red decoy cell between two real cells (blue, green);
+    // playback skips it through a cell command. Seeking must never land in it.
+    const picture = () => page.evaluate(() => {
+      const d = document.getElementById('canvas').getContext('2d').getImageData(640, 150, 1, 1).data;
+      return d[0] > 150 && d[1] < 80 ? 'decoy' : d[2] > 150 && d[0] < 80 ? 'A' : d[1] > 100 && d[0] < 80 ? 'B' : 'other';
+    });
+    await page.selectOption('#sel-title', '4');
+    await sleep(3000);
+    s = await st();
+    check('protected title length excludes the decoy', s.title === 4 && Math.abs(s.length - 20000) < 1000, JSON.stringify(s));
+    const seekBar = await page.locator('#seek').boundingBox();
+    const seekTo = (f) => page.mouse.click(seekBar.x + seekBar.width * f, seekBar.y + seekBar.height / 2);
+    await seekTo(0.75);
+    await sleep(2000);
+    s = await st();
+    let pic = await picture();
+    check('seek bar skips the decoy cell', pic === 'B' && s.time > 10000, `${pic}, ${JSON.stringify(s)}`);
+    await seekTo(0.02);
+    await sleep(1500);
+    await page.keyboard.press('l');
+    await sleep(2000);
+    s = await st();
+    pic = await picture();
+    check('+10 s skips the decoy cell', pic === 'B' && s.time > 10000, `${pic}, ${JSON.stringify(s)}`);
+    await shot('5-protected-title');
   } catch (e) {
     check('scenario completed', false, e.message);
   }
