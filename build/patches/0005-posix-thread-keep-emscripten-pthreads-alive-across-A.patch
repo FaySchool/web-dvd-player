@@ -1,7 +1,7 @@
 From 6aedf3f5437104ad94ce55a86b01319fee065638 Mon Sep 17 00:00:00 2001
 From: web-dvd-player <web-dvd-player@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 16:26:43 +0000
-Subject: [PATCH 5/6] posix/thread: keep emscripten pthreads alive across
+Subject: [PATCH 5/8] posix/thread: keep emscripten pthreads alive across
  ASYNCIFY suspensions
 
 VLC threads may suspend through EM_ASYNC_JS (vout WebGL setup, file

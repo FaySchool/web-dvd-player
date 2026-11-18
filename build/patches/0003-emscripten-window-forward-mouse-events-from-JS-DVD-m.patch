@@ -1,7 +1,7 @@
 From 178948580936d24965b2bea3023db792f3caabaf Mon Sep 17 00:00:00 2001
 From: web-dvd-player <web-dvd-player@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 16:14:26 +0000
-Subject: [PATCH 3/6] emscripten window: forward mouse events from JS (DVD menu
+Subject: [PATCH 3/8] emscripten window: forward mouse events from JS (DVD menu
  clicks)
 
 ---

@@ -1,7 +1,7 @@
 From d4bc678ca831691cfd3df10ede7f2aee9bda9755 Mon Sep 17 00:00:00 2001
 From: web-dvd-player <web-dvd-player@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 16:23:23 +0000
-Subject: [PATCH 4/6] vout: release the display from the vout thread on
+Subject: [PATCH 4/8] vout: release the display from the vout thread on
  emscripten
 
 The WebGL context lives in the worker running the vout thread; closing

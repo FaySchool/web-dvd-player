@@ -61,6 +61,7 @@ function check(name, ok, detail) {
     AudioNode.prototype.connect = function (dest, ...rest) {
       if (this instanceof AudioWorkletNode && dest instanceof AudioDestinationNode) {
         const analyser = this.context.createAnalyser();
+        analyser.fftSize = 32768;
         connect.call(this, analyser);
         window.__analyser = analyser;
       }
@@ -72,6 +73,22 @@ function check(name, ok, detail) {
       const d = new Float32Array(a.fftSize);
       a.getFloatTimeDomainData(d);
       return d.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
+    };
+    // Frequency of the test tone (zero crossings) and the largest
+    // sample-to-sample jump relative to the peak: a clean sine of frequency
+    // f gives 2*pi*f/rate; garbled audio has jumps close to 1 or more.
+    window.__tone = () => {
+      const a = window.__analyser;
+      if (!a) return null;
+      const d = new Float32Array(a.fftSize);
+      a.getFloatTimeDomainData(d);
+      let z = 0, peak = 0, jump = 0;
+      for (let i = 1; i < d.length; i++) {
+        if ((d[i - 1] < 0) !== (d[i] < 0)) z++;
+        peak = Math.max(peak, Math.abs(d[i]));
+        jump = Math.max(jump, Math.abs(d[i] - d[i - 1]));
+      }
+      return { hz: z / 2 / (d.length / a.context.sampleRate), jump: jump / peak, rate: a.context.sampleRate };
     };
   });
   const page = await context.newPage();
@@ -168,6 +185,29 @@ function check(name, ok, detail) {
     await sleep(6000);
     s = await st();
     check('re-opening the disc works', s.state === 3 && s.title === 0, JSON.stringify(s));
+
+    // Audio quality for each channel layout, in an order where the layout
+    // changes between titles (stereo menu -> mono -> 5.1 -> stereo).
+    const tones = [
+      { title: '2', hz: 880, layout: 'mono AC-3' },
+      { title: '3', hz: 660, layout: '5.1 AC-3' },
+      { title: '1', hz: 440, layout: 'stereo AC-3' },
+    ];
+    for (const t of tones) {
+      await page.selectOption('#sel-title', t.title);
+      await sleep(4500);
+      let worst = null;
+      for (let i = 0; i < 3; i++) {
+        const r = await page.evaluate(() => window.__tone());
+        if (!r) break;
+        const clean = 2 * Math.PI * t.hz / r.rate;
+        const bad = Math.abs(r.hz - t.hz) / t.hz > 0.02 || r.jump > clean * 1.5;
+        if (!worst || bad) worst = { ...r, bad };
+        await sleep(600);
+      }
+      check(`${t.layout} audio is clean (title ${t.title})`, worst && !worst.bad,
+        worst && `${worst.hz.toFixed(0)} Hz, jump ${worst.jump.toFixed(3)}`);
+    }
   } catch (e) {
     check('scenario completed', false, e.message);
   }

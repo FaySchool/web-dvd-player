@@ -422,8 +422,31 @@ static void run_cmd(cmd_t *c)
             break;
         /* type: 0 move, 1 press, 2 release, 3 double click */
         case CMD_MOUSE:
+        {
+            /* VLC's video output only keeps the latest mouse state between
+             * two iterations of its thread: a press immediately followed by
+             * a release can be seen as "released" only, losing the click.
+             * Keep the button pressed long enough for the vout (and the
+             * DVD menu) to see it. */
+            static struct timespec pressed_at;
+            if (c->i0 == 2 && pressed_at.tv_sec != 0)
+            {
+                struct timespec now;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                long elapsed_ms = (now.tv_sec - pressed_at.tv_sec) * 1000
+                                + (now.tv_nsec - pressed_at.tv_nsec) / 1000000;
+                if (elapsed_ms < 120)
+                {
+                    struct timespec wait = { 0, (120 - elapsed_ms) * 1000000L };
+                    nanosleep(&wait, NULL);
+                }
+                pressed_at.tv_sec = 0;
+            }
             wasm_window_mouse_event(c->i0, c->i1, c->i2, c->i3);
+            if (c->i0 == 1)
+                clock_gettime(CLOCK_MONOTONIC, &pressed_at);
             break;
+        }
     }
 }
 

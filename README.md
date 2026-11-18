@@ -113,6 +113,12 @@ Patches on top of VLC + vlc.js (`build/patches/`):
    still suspended).
 6. libdvdnav: clear a stale "skip still" request when jumping, so calling the
    menu right after a title/chapter jump no longer stops playback.
+7. Audio output: a fixed stereo output that every stream is converted to
+   (mono, 5.1 and other layouts used to come out garbled whenever they
+   differed from the first stream), proper ring-buffer flow control, latency
+   reporting for A/V sync, and pause without dropping audio.
+8. dvdnav: execute mouse clicks on menu buttons on the demux thread (they
+   could deadlock playback when run on the video output thread).
 
 ### Building locally
 
@@ -128,11 +134,12 @@ build/build.sh link     # only relink after editing build/src/dvdplayer.c
 ### Testing
 
 `tools/make-test-dvd.sh` authors a small DVD-Video image with a real menu (two
-buttons, two titles, chapters, AC-3 and MPEG audio, a subtitle track) using
-ffmpeg, dvdauthor, ImageMagick and genisoimage. `tools/e2e-test.js` drives the
-player in headless Chromium against it (menu clicks, title end → menu, title
-and chapter changes, subtitles, pause, Menu/Resume, eject/re-open, and checks
-that audio samples are produced):
+buttons, three titles, chapters, stereo, mono and 5.1 AC-3 audio, a subtitle
+track) using ffmpeg, dvdauthor, ImageMagick and genisoimage. `tools/e2e-test.js`
+drives the player in headless Chromium against it (menu clicks, title end →
+menu, title and chapter changes, subtitles, pause, Menu/Resume, eject/re-open)
+and analyses the audio output of each title's test tone to check it is
+undistorted:
 
 ```bash
 tools/make-test-dvd.sh /tmp/test-dvd.iso

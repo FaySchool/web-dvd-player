@@ -43,6 +43,9 @@ class Processor extends AudioWorkletProcessor {
         if (this.head.buffer.byteLength === 0) {
             throw new Error('wasmMemory grew');
         }
+        /* While paused, output silence but keep the buffered samples */
+        if (Atomics.load(this.is_paused, 0) !== 0)
+            return true;
         var head = Atomics.load(this.head, 0) / 4;
         var tail = Atomics.load(this.tail, 0) / 4;
 
