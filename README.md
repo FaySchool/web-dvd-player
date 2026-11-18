@@ -60,14 +60,18 @@ that adds them; on the very first visit the page reloads itself once.
 
 1. In the repository settings: **Settings → Pages → Build and deployment →
    Source: GitHub Actions**.
-2. Push to `main`. The **Deploy to GitHub Pages** workflow publishes `site/`.
+2. Push to `main`. The **Deploy to GitHub Pages** workflow publishes the site.
 
-The prebuilt engine is committed in `site/vlc/`, so no compilation is needed to
+   Alternatively, choose **Source: Deploy from a branch** with the `/ (root)`
+   folder: `index.html` lives at the repository root, so it is served as is
+   (`.nojekyll` disables Jekyll processing).
+
+The prebuilt engine is committed in `vlc/`, so no compilation is needed to
 deploy. To rebuild it from source, run the **Build VLC WebAssembly** workflow
 (Actions tab → *Run workflow*); it builds, runs the end-to-end test and commits
-the new `site/vlc/`.
+the new `vlc/`.
 
-To try it locally, serve `site/` over HTTP, e.g. `python3 -m http.server -d site`
+To try it locally, serve the repository root over HTTP, e.g. `python3 -m http.server`
 and open <http://localhost:8000> (the service worker also works on `localhost`).
 
 ## How it works
@@ -75,7 +79,7 @@ and open <http://localhost:8000> (the service worker also works on `localhost`).
 ```
  page (main thread)            VLC (WebAssembly, ~40 pthreads = Web Workers)
  ─────────────────            ─────────────────────────────────────────────
- site/js/app.js  ──commands──▶ control thread (build/src/dvdplayer.c) ── libVLC
+ js/app.js       ──commands──▶ control thread (build/src/dvdplayer.c) ── libVLC
         ▲          (queue)                                                 │
         │ state snapshot (shared memory) + async events                    ▼
         │                       input: emjsfile access (File.slice + FileReaderSync)
@@ -90,7 +94,7 @@ and open <http://localhost:8000> (the service worker also works on `localhost`).
   [vlc.js](https://code.videolan.org/jbk/vlc.js) port patches, applies this
   project's patches (`build/patches/`), builds the contribs (FFmpeg, libdvdcss,
   libdvdread, libdvdnav, zlib) and VLC, and links them with
-  `build/src/dvdplayer.c` into `site/vlc/dvdplayer.{js,wasm,worker.js}`.
+  `build/src/dvdplayer.c` into `vlc/dvdplayer.{js,wasm,worker.js}`.
 - The page never calls libVLC synchronously: several VLC threads wait on the
   browser's main thread (WebGL/OffscreenCanvas setup, file hand-off, audio),
   so a blocked main thread would deadlock. Commands are queued to a control
@@ -149,6 +153,6 @@ node tools/e2e-test.js /tmp/test-dvd.iso
 
 VLC, libdvdnav, libdvdread, libdvdcss and FFmpeg (as configured here) are
 licensed under the GNU GPL (v2 or later) / LGPL, so the combined WebAssembly
-engine in `site/vlc/` is distributed under the **GPL-2.0-or-later**. Its complete
+engine in `vlc/` is distributed under the **GPL-2.0-or-later**. Its complete
 corresponding source is the pinned upstream sources plus the build script and
 patches in `build/`. The coi-serviceworker script is MIT licensed.

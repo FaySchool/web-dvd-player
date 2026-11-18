@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // End-to-end test of the player in headless Chromium against a DVD image made
-// by tools/make-test-dvd.sh. Serves site/ with COOP/COEP headers itself.
+// by tools/make-test-dvd.sh. Serves the repository root with COOP/COEP headers itself.
 //
 //   npm install --no-save playwright && npx playwright install chromium
 //   tools/make-test-dvd.sh /tmp/test-dvd.iso
@@ -19,7 +19,7 @@ if (!iso) {
   process.exit(2);
 }
 
-const SITE = path.join(__dirname, '..', 'site');
+const SITE = path.join(__dirname, '..');
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.txt': 'text/plain' };
 
 function serve() {

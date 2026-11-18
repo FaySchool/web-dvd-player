@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Build VLC (libVLC + libdvdnav/libdvdread/libdvdcss + FFmpeg) to WebAssembly
-# and link it with build/src/dvdplayer.c into site/vlc/.
+# and link it with build/src/dvdplayer.c into vlc/ (at the repository root).
 #
 # Usage:
 #   build/build.sh            full build (fetch, patch, contribs, VLC, link)
@@ -22,7 +22,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 WORK_DIR="${WORK_DIR:-$BUILD_DIR/work}"
-OUT_DIR="$ROOT_DIR/site/vlc"
+OUT_DIR="$ROOT_DIR/vlc"
 JOBS="${JOBS:-$(nproc)}"
 
 # Pinned versions. VLC_HASH / VLCJS_HASH are the combination validated by the
@@ -143,4 +143,4 @@ cp "$VLC_DIR/modules/audio_output/webaudio/audio-worklet-processor.js" \
 } > "$OUT_DIR/BUILD_INFO.txt"
 
 ls -la "$OUT_DIR"
-log "Done. Serve the site/ directory (see README)."
+log "Done. Serve the repository root (see README)."

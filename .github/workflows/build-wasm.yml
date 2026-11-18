@@ -1,6 +1,6 @@
 name: Build VLC WebAssembly
 
-# Rebuilds site/vlc/ (VLC + libdvdnav/libdvdread/libdvdcss + FFmpeg compiled
+# Rebuilds vlc/ (VLC + libdvdnav/libdvdread/libdvdcss + FFmpeg compiled
 # to WebAssembly) from source with build/build.sh, runs the end-to-end test
 # against a generated DVD image, and optionally commits the result.
 #
@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       commit:
-        description: "Commit the rebuilt engine (site/vlc) to this branch"
+        description: "Commit the rebuilt engine (vlc/) to this branch"
         type: boolean
         default: true
 
@@ -56,14 +56,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: vlc-wasm
-          path: site/vlc
+          path: vlc
 
       - name: Commit the rebuilt engine
         if: ${{ inputs.commit }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add site/vlc
+          git add vlc
           if git diff --cached --quiet; then
             echo "Engine unchanged."
           else

@@ -1,7 +1,7 @@
 name: Deploy to GitHub Pages
 
-# Publishes the static site in site/ (including the prebuilt VLC WebAssembly
-# engine in site/vlc/). Enable it in the repository settings:
+# Publishes the static site at the repository root (index.html, including the
+# prebuilt VLC WebAssembly engine in vlc/). Enable it in the repository settings:
 #   Settings -> Pages -> Build and deployment -> Source: "GitHub Actions"
 
 on:
@@ -31,8 +31,8 @@ jobs:
         run: |
           for f in dvdplayer.js dvdplayer.wasm dvdplayer.worker.js \
                    modules/audio_output/webaudio/audio-worklet-processor.js; do
-            if [ ! -f "site/vlc/$f" ]; then
-              echo "::error::site/vlc/$f is missing. Run the 'Build VLC WebAssembly' workflow (or build/build.sh) first."
+            if [ ! -f "vlc/$f" ]; then
+              echo "::error::vlc/$f is missing. Run the 'Build VLC WebAssembly' workflow (or build/build.sh) first."
               exit 1
             fi
           done
@@ -41,7 +41,7 @@ jobs:
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: .
 
       - id: deployment
         uses: actions/deploy-pages@v4
