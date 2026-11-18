@@ -28,6 +28,9 @@ class Processor extends AudioWorkletProcessor {
                 this.tail = e.data.tail;
                 this.can_write = e.data.can_write;
                 this.storage = e.data.storage;
+                this.flush_pos = e.data.flush_pos;
+                this.flush_seq = e.data.flush_seq;
+                this.flush_ack = e.data.flush_ack;
                 this.port.postMessage( 'ready' );
             } else {
                 this.port.postMessage( 'error' );
@@ -42,6 +45,13 @@ class Processor extends AudioWorkletProcessor {
         const nbSamples = output[0].length;
         if (this.head.buffer.byteLength === 0) {
             throw new Error('wasmMemory grew');
+        }
+        /* Pending flush: drop everything written before flush_pos. Only
+         * this thread writes tail, so this cannot race with the writer. */
+        const seq = Atomics.load(this.flush_seq, 0);
+        if (seq !== Atomics.load(this.flush_ack, 0)) {
+            Atomics.store(this.tail, 0, Atomics.load(this.flush_pos, 0));
+            Atomics.store(this.flush_ack, 0, seq);
         }
         /* While paused, output silence but keep the buffered samples */
         if (Atomics.load(this.is_paused, 0) !== 0)

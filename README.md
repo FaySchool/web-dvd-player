@@ -124,8 +124,8 @@ Patches on top of VLC + vlc.js (`build/patches/`):
    (mono, 5.1 and other layouts used to come out garbled whenever they
    differed from the first stream), proper ring-buffer flow control, latency
    reporting for A/V sync (smoothed, as the browser renders audio in bursts
-   and a jittery audio clock made the video stutter), and pause without
-   dropping audio.
+   and, audio being the master clock, a jittery or wrong latency makes the
+   video stutter), a race-free flush, and pause without dropping audio.
 8. dvdnav: execute mouse clicks on menu buttons on the demux thread (they
    could deadlock playback when run on the video output thread).
 9. libdvdnav + dvdnav: seek along the real playback path of titles
