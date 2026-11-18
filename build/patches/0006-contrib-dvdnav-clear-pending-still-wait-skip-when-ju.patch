@@ -1,4 +1,4 @@
-From 68d0f43ddfd805328ddb904595c9078677a0cce2 Mon Sep 17 00:00:00 2001
+From 3d4675be99ec64c4465d6e31d6eb49c74e5e936e Mon Sep 17 00:00:00 2001
 From: web-dvd-player <web-dvd-player@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 17:36:51 +0000
 Subject: [PATCH 6/9] contrib: dvdnav: clear pending still/wait skip when

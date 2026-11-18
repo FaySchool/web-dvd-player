@@ -112,7 +112,9 @@ Patches on top of VLC + vlc.js (`build/patches/`):
 1. Build the DVD contribs for WebAssembly (libdvdcss without drive ioctls,
    libdvdread byte-swap headers) and only the contribs that are needed.
 2. `emjsfile`: 64-bit file offsets, so images larger than 4 GiB play.
-3. Emscripten window: forward mouse/touch events, for clicking menu buttons.
+3. Emscripten window/vout: forward mouse/touch events, for clicking menu
+   buttons; present frames without copying them on the main thread
+   (`transferFromImageBitmap`), so a busy page doesn't make the video late.
 4. Video output: release the display on the thread owning its WebGL context
    (title changes used to crash).
 5. Threads: keep emscripten pthreads alive across ASYNCIFY suspensions
@@ -158,6 +160,13 @@ tools/make-test-dvd.sh /tmp/test-dvd.iso
 npm install --no-save playwright && npx playwright install chromium
 node tools/e2e-test.js /tmp/test-dvd.iso
 ```
+
+## Troubleshooting
+
+- Add `?debug=1` (warnings) or `?debug` (verbose) to the URL to get VLC's log
+  in the browser console.
+- Extra VLC options can be passed for experiments with `?vlcargs=`, comma
+  separated, e.g. `?vlcargs=--disc-caching=1000,--avcodec-threads=4`.
 
 ## Limitations
 

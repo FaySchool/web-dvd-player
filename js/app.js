@@ -85,6 +85,9 @@ const VLC_ARGS = [
 ];
 const debugLevel = new URLSearchParams(location.search).get('debug');
 if (debugLevel !== null) VLC_ARGS.push(debugLevel === '1' ? '-v' : '-vv');
+// Diagnostics: extra VLC options, e.g. ?vlcargs=--avcodec-threads=4,--disc-caching=1000
+const extraArgs = new URLSearchParams(location.search).get('vlcargs');
+if (extraArgs) VLC_ARGS.push(...extraArgs.split(',').map((a) => a.trim()).filter((a) => a.startsWith('--')));
 
 // ---- Engine facade --------------------------------------------------------
 let Module = null;
@@ -255,8 +258,11 @@ function resetUi() {
   el.timeCur.textContent = el.timeLen.textContent = '0:00';
   el.play.classList.remove('playing');
   try {
-    const ctx = el.canvas.getContext('2d');
-    ctx.clearRect(0, 0, el.canvas.width, el.canvas.height);
+    // VLC presents frames through an ImageBitmapRenderingContext (falling
+    // back to 2D); clear whichever the canvas uses.
+    const ctx = el.canvas.getContext('bitmaprenderer') || el.canvas.getContext('2d');
+    if (ctx.transferFromImageBitmap) ctx.transferFromImageBitmap(null);
+    else ctx.clearRect(0, 0, el.canvas.width, el.canvas.height);
   } catch {}
 }
 

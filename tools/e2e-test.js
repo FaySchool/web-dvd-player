@@ -212,7 +212,12 @@ function check(name, ok, detail) {
     // Title 4 hides a red decoy cell between two real cells (blue, green);
     // playback skips it through a cell command. Seeking must never land in it.
     const picture = () => page.evaluate(() => {
-      const d = document.getElementById('canvas').getContext('2d').getImageData(640, 150, 1, 1).data;
+      // The player canvas uses a bitmaprenderer context: copy it to sample it
+      const c = document.createElement('canvas');
+      c.width = 1280; c.height = 720;
+      const g = c.getContext('2d');
+      g.drawImage(document.getElementById('canvas'), 0, 0);
+      const d = g.getImageData(640, 150, 1, 1).data;
       return d[0] > 150 && d[1] < 80 ? 'decoy' : d[2] > 150 && d[0] < 80 ? 'A' : d[1] > 100 && d[0] < 80 ? 'B' : 'other';
     });
     await page.selectOption('#sel-title', '4');

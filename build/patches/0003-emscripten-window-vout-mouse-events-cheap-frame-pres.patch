@@ -1,15 +1,24 @@
-From 178948580936d24965b2bea3023db792f3caabaf Mon Sep 17 00:00:00 2001
+From 77ba2d0ca0d52fea933e1b8e433a16a2e0c763b7 Mon Sep 17 00:00:00 2001
 From: web-dvd-player <web-dvd-player@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 16:14:26 +0000
-Subject: [PATCH 3/9] emscripten window: forward mouse events from JS (DVD menu
- clicks)
+Subject: [PATCH 3/9] emscripten window/vout: mouse events, cheap frame
+ presentation
 
+- Forward mouse events from JS to the window (wasm_window_mouse_event),
+  so DVD menu buttons can be hovered and clicked.
+- Present frames with an ImageBitmapRenderingContext
+  (transferFromImageBitmap) instead of copying them with a 2D drawImage
+  on the main thread. Frames posted to a busy main thread hold GPU
+  buffers the vout thread needs: with the copy, a loaded main thread made
+  the video output late (dropped frames, then decoder back-pressure,
+  late PCRs and rebuffering). Falls back to 2D, replacing (not blending)
+  the previous frame, which may have had another aspect ratio.
 ---
- modules/video_output/emscripten.cpp | 50 ++++++++++++++++++++++++++---
- 1 file changed, 46 insertions(+), 4 deletions(-)
+ modules/video_output/emscripten.cpp | 68 +++++++++++++++++++++++++----
+ 1 file changed, 60 insertions(+), 8 deletions(-)
 
 diff --git a/modules/video_output/emscripten.cpp b/modules/video_output/emscripten.cpp
-index e22342e..0701be1 100644
+index e22342e..613ad7c 100644
 --- a/modules/video_output/emscripten.cpp
 +++ b/modules/video_output/emscripten.cpp
 @@ -26,6 +26,7 @@
@@ -80,17 +89,40 @@ index e22342e..0701be1 100644
      wnd->handle.canvas = "canvas";
  
      //emscripten::val size = GetCanvasSize();
-@@ -180,6 +218,10 @@ static int Open (vlc_gl_t *gl, unsigned width, unsigned height)
-             let canvasName = UTF8ToString($1);
-             Module.canvasCtx = document.getElementById(canvasName).getContext('2d');
+@@ -177,15 +215,29 @@ static int Open (vlc_gl_t *gl, unsigned width, unsigned height)
+ 
+     MAIN_THREAD_EM_ASM({
+         if (Module.canvasCtx === undefined) {
+-            let canvasName = UTF8ToString($1);
+-            Module.canvasCtx = document.getElementById(canvasName).getContext('2d');
++            let canvas = document.getElementById(UTF8ToString($1));
++            /* Hand frames over to the page canvas without copying them
++             * (ImageBitmapRenderingContext): presenting a frame must cost the
++             * main thread as little as possible, as unconsumed frames hold
++             * GPU buffers the video output thread needs. */
++            Module.canvasCtx = canvas.getContext('bitmaprenderer');
++            if (!Module.canvasCtx) {
++                Module.canvasCtx = canvas.getContext('2d');
++                /* Frames cover the whole surface (letterboxing included,
++                 * possibly transparent): replace, don't blend. */
++                Module.canvasCtx.globalCompositeOperation = 'copy';
++            }
          }
-+        /* Frames cover the whole surface (letterboxing included, possibly
-+         * transparent): replace the canvas content instead of blending over
-+         * the previous frame, which may have had another aspect ratio. */
-+        Module.canvasCtx.globalCompositeOperation = 'copy';
          function onVoutMessage(msg) {
              let data = msg['data'];
              if (data.customCmd == 'commitFrame') {
+                 let bmp = data['bitmap'];
+-                Module.canvasCtx.drawImage(bmp, 0, 0);
+-                bmp.close();
++                if (Module.canvasCtx.transferFromImageBitmap) {
++                    Module.canvasCtx.transferFromImageBitmap(bmp);
++                } else {
++                    Module.canvasCtx.drawImage(bmp, 0, 0);
++                    bmp.close();
++                }
+             }
+         }
+         let w = Module.PThread.pthreads[$0];
 -- 
 2.43.0
 

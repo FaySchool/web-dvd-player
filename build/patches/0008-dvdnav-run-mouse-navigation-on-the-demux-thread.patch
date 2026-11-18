@@ -1,4 +1,4 @@
-From b6180fee9291f874990d87c265bf5401a587270f Mon Sep 17 00:00:00 2001
+From 51c3dbe40777993b3f447a9fdcdcbe5266a7cd69 Mon Sep 17 00:00:00 2001
 From: web-dvd-player <web-dvd-player@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 18:25:01 +0000
 Subject: [PATCH 8/9] dvdnav: run mouse navigation on the demux thread

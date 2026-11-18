@@ -195,8 +195,12 @@ static void on_event(const libvlc_event_t *ev, void *data)
         default:
             return;
     }
-    if (kind != EV_TIME)
-        mark_dirty();
+    /* Time and length are published through the state snapshot that the page
+     * polls; time changes fire hundreds of times per second, so don't post
+     * them to the (possibly busy) main thread. */
+    if (kind == EV_TIME || kind == EV_LENGTH)
+        return;
+    mark_dirty();
     /* Fire-and-forget: never wait for the main thread from a VLC thread. */
     MAIN_THREAD_ASYNC_EM_ASM({
         if (Module.onPlayerEvent)
