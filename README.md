@@ -28,6 +28,11 @@ is never loaded into memory as a whole, so dual-layer (> 4 GB) images work.
   cells really played.
 - Audio track and subtitle selection (DVD sub-pictures, including menu
   highlights), volume/mute, deinterlacing, fullscreen.
+- The picture area follows the disc's display aspect ratio (4:3 or 16:9,
+  switching as menus and titles change), so 4:3 discs aren't windowboxed
+  inside a 16:9 frame.
+- A loading card with a progress bar while the engine downloads and the disc
+  opens, until the first picture appears.
 - MPEG-2 video; AC-3, MPEG audio, LPCM and DTS audio (FFmpeg).
 - CSS-scrambled discs: **libdvdcss** descrambles on the fly (title keys are
   recovered from the image itself, as there is no drive to ask). Because the
@@ -140,6 +145,10 @@ Patches on top of VLC + vlc.js (`build/patches/`):
     decoder thread could stay blocked waiting for a picture buffer, so the
     video output was never paused and subtitles kept advancing while the
     picture was frozen).
+11. `emjsfile`: read the image ahead in 1 MiB chunks. Every synchronous read
+    of the browser `File` costs ~0.5 ms, and libdvdcss reads key-search
+    sectors one at a time, so opening a CSS disc took seconds per title set
+    (test disc: 4.3 s → 0.17 s).
 
 ### Building locally
 

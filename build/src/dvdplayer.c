@@ -44,7 +44,7 @@ static libvlc_media_player_t *mp = NULL;
 enum {
     ST_STATE, ST_TIME, ST_LENGTH, ST_POSITION, ST_TITLE, ST_TITLE_COUNT,
     ST_CHAPTER, ST_CHAPTER_COUNT, ST_VOLUME, ST_MUTE, ST_SEEKABLE, ST_VOUTS,
-    ST_JSON_VERSION, ST_RATE, ST_SEEK_TARGET, ST_COUNT
+    ST_JSON_VERSION, ST_RATE, ST_SEEK_TARGET, ST_VIDEO_DAR, ST_COUNT
 };
 static double state[ST_COUNT];
 
@@ -370,6 +370,22 @@ static void refresh_state(bool full)
     state[ST_MUTE] = libvlc_audio_get_mute(mp);
     state[ST_SEEKABLE] = libvlc_media_player_is_seekable(mp);
     state[ST_RATE] = libvlc_media_player_get_rate(mp);
+
+    /* Display aspect ratio of the current video (4:3 or 16:9 on DVDs), from
+     * the frame size and the sample (pixel) aspect ratio */
+    libvlc_media_track_t *video =
+        libvlc_media_player_get_selected_track(mp, libvlc_track_video);
+    if (video != NULL)
+    {
+        const libvlc_video_track_t *v = video->video;
+        if (v != NULL && v->i_width > 0 && v->i_height > 0)
+        {
+            double sar = (v->i_sar_num > 0 && v->i_sar_den > 0)
+                       ? (double) v->i_sar_num / v->i_sar_den : 1.;
+            state[ST_VIDEO_DAR] = v->i_width * sar / v->i_height;
+        }
+        libvlc_media_track_release(video);
+    }
     if (full)
     {
         set_json(JSON_TITLES, titles_json());
@@ -549,6 +565,9 @@ static void run_cmd(cmd_t *c)
         case CMD_OPEN:
         {
             event_time = -1;
+            /* Per-disc state the page must not take from the previous disc */
+            state[ST_VOUTS] = 0;
+            state[ST_VIDEO_DAR] = 0;
             libvlc_media_t *m = libvlc_media_new_location(vlc, c->str);
             if (m == NULL)
                 break;

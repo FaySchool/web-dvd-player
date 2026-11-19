@@ -19,6 +19,10 @@ const el = {
   dropzone: $('dropzone'),
   loading: $('loading'),
   loadingText: $('loading-text'),
+  loadingTitle: $('loading-title'),
+  loadingBar: $('loading-bar'),
+  loadingFill: $('loading-fill'),
+  viewport: $('viewport'),
   error: $('error'),
   errorTitle: $('error-title'),
   errorText: $('error-text'),
@@ -52,7 +56,7 @@ const CMD = {
 const ST = {
   STATE: 0, TIME: 1, LENGTH: 2, POSITION: 3, TITLE: 4, TITLE_COUNT: 5,
   CHAPTER: 6, CHAPTER_COUNT: 7, VOLUME: 8, MUTE: 9, SEEKABLE: 10, VOUTS: 11,
-  JSON_VERSION: 12, RATE: 13, SEEK_TARGET: 14,
+  JSON_VERSION: 12, RATE: 13, SEEK_TARGET: 14, VIDEO_DAR: 15,
 };
 const JSON_KIND = { titles: 0, audio: 1, spu: 2 };
 // libvlc_state_t
@@ -126,6 +130,8 @@ const ui = {
   loaded: false,
   seeking: false,
   seekShown: false,
+  awaitingFrame: false, // loading overlay shown until the disc's first frame
+  dar: 16 / 9,          // display aspect ratio of the video
   hasVideo: false,
   jsonVersion: -1,
 };
@@ -146,6 +152,85 @@ function fatal(title, text) {
 }
 
 function setStatus(text) { el.status.textContent = text; }
+
+// Loading panel over the picture. progress: 0..1, or null when unknown.
+function setLoading(title, detail, progress = null) {
+  if (title != null) el.loadingTitle.textContent = title;
+  if (detail != null) el.loadingText.textContent = detail;
+  const known = progress != null && Number.isFinite(progress);
+  el.loadingBar.classList.toggle('indeterminate', !known);
+  el.loadingFill.style.width = known ? `${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%` : '';
+  if (known) el.loadingBar.setAttribute('aria-valuenow', String(Math.round(progress * 100)));
+  else el.loadingBar.removeAttribute('aria-valuenow');
+}
+
+const fmtMB = (bytes) => (bytes / 1048576).toFixed(1);
+
+// Download and compile the engine (~20 MB of WebAssembly) ourselves to report
+// progress: streamed through instantiateStreaming, so compilation overlaps the
+// download. Plugged into emscripten through Module.instantiateWasm.
+function instantiateWithProgress(imports, receiveInstance, onFail) {
+  (async () => {
+    const response = await fetch('vlc/dvdplayer.wasm', { credentials: 'same-origin' });
+    if (!response.ok) throw new Error(`Could not download the engine (HTTP ${response.status}).`);
+    // The size is only usable when the body is not transfer-compressed
+    const length = Number(response.headers.get('Content-Length')) || 0;
+    const total = response.headers.get('Content-Encoding') ? 0 : length;
+    let received = 0;
+    const counted = new ReadableStream({
+      async start(controller) {
+        const reader = response.body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          received += value.byteLength;
+          setLoading(null, total
+            ? `Downloading the VLC engine: ${fmtMB(received)} of ${fmtMB(total)} MB`
+            : `Downloading the VLC engine: ${fmtMB(received)} MB`,
+          total && received <= total ? received / total : null);
+          controller.enqueue(value);
+        }
+        controller.close();
+        setLoading(null, 'Starting the VLC engine…', null);
+      },
+    });
+    const wasmResponse = new Response(counted, { headers: { 'Content-Type': 'application/wasm' } });
+    let result;
+    if (WebAssembly.instantiateStreaming) {
+      result = await WebAssembly.instantiateStreaming(wasmResponse, imports);
+    } else {
+      result = await WebAssembly.instantiate(await wasmResponse.arrayBuffer(), imports);
+    }
+    // The module is also needed to start the engine's worker threads
+    receiveInstance(result.instance, result.module);
+  })().catch(onFail);
+  return {}; // asynchronous instantiation
+}
+
+// VLC presents video frames on the page canvas through Module.canvasCtx,
+// which it only creates if not set: provide it, to notice the first frame of
+// a disc (which ends the loading overlay) without patching VLC.
+function installFrameHook(mod) {
+  const onFrame = () => {
+    if (ui.awaitingFrame) {
+      ui.awaitingFrame = false;
+      ui.hasVideo = true;
+      showOverlay(null);
+    }
+  };
+  const bitmap = el.canvas.getContext('bitmaprenderer');
+  if (bitmap) {
+    mod.canvasCtx = {
+      transferFromImageBitmap(b) { bitmap.transferFromImageBitmap(b); onFrame(); },
+    };
+  } else {
+    const ctx2d = el.canvas.getContext('2d');
+    ctx2d.globalCompositeOperation = 'copy';
+    mod.canvasCtx = {
+      drawImage(...args) { ctx2d.drawImage(...args); onFrame(); },
+    };
+  }
+}
 
 function environmentProblem() {
   if (typeof WebAssembly !== 'object') return 'This browser does not support WebAssembly.';
@@ -168,19 +253,26 @@ function loadEngine() {
     if (typeof window.createVlcModule !== 'function') {
       throw new Error('vlc/dvdplayer.js is missing. Build it with build/build.sh (see README).');
     }
-    el.loadingText.textContent = 'Loading VLC engine (≈20 MB)…';
+    setLoading('Loading the player', 'Downloading the VLC engine…', 0);
     showOverlay(el.loading);
     setStatus('Loading VLC engine…');
 
-    const mod = await window.createVlcModule({
-      canvas: el.canvas,
-      vlc_access_file: {},
-      print: (t) => console.log(t),
-      printErr: (t) => console.warn(t),
-      locateFile: (path) => 'vlc/' + path,
-      mainScriptUrlOrBlob: new URL('vlc/dvdplayer.js', location.href).href,
-    });
+    let failInstantiate;
+    const instantiateFailed = new Promise((_, reject) => { failInstantiate = reject; });
+    const mod = await Promise.race([
+      window.createVlcModule({
+        canvas: el.canvas,
+        vlc_access_file: {},
+        print: (t) => console.log(t),
+        printErr: (t) => console.warn(t),
+        locateFile: (path) => 'vlc/' + path,
+        mainScriptUrlOrBlob: new URL('vlc/dvdplayer.js', location.href).href,
+        instantiateWasm: (imports, receive) => instantiateWithProgress(imports, receive, failInstantiate),
+      }),
+      instantiateFailed,
+    ]);
     mod.onPlayerEvent = onPlayerEvent;
+    installFrameHook(mod);
 
     // libvlc_new(argc, argv) — the only synchronous libvlc call, made before
     // any media (and thus any VLC thread needing the main thread) exists.
@@ -226,11 +318,21 @@ async function openFile(file) {
     return;
   }
 
-  el.loadingText.textContent = `Opening ${file.name}…`;
-  showOverlay(el.loading);
-
   if (ui.loaded) vlc.cmd(CMD.STOP);
   resetUi();
+
+  setLoading(`Opening “${file.name}”`, 'Reading the disc structure…', null);
+  showOverlay(el.loading);
+  ui.awaitingFrame = true;
+  // Opening can take a while: reading IFOs from a slow disk, and on
+  // CSS-encrypted discs, recovering the title keys from the image.
+  clearTimeout(ui.slowOpenTimer);
+  ui.slowOpenTimer = setTimeout(() => {
+    if (ui.awaitingFrame && el.loadingBar.classList.contains('indeterminate')) {
+      setLoading(null, 'Still reading the disc structure and decryption keys. ' +
+        'Encrypted discs can take up to a minute to open.', null);
+    }
+  }, 5000);
 
   // VLC's "emjsfile" access module reads the File object lazily, in slices,
   // from a worker thread — the image is never loaded into memory at once.
@@ -248,6 +350,11 @@ async function openFile(file) {
 
 function resetUi() {
   ui.hasVideo = false;
+  ui.awaitingFrame = false;
+  clearTimeout(ui.slowOpenTimer);
+  clearTimeout(ui.bufferStallTimer);
+  ui.dar = 16 / 9;
+  layoutViewport();
   ui.jsonVersion = -1;
   for (const s of [el.selTitle, el.selChapter, el.selAudio, el.selSpu]) {
     s.innerHTML = '';
@@ -284,6 +391,18 @@ function onPlayerEvent(kind, value) {
     case EV.OPENING:
       setStatus(`Opening ${currentName}…`);
       break;
+    case EV.BUFFERING:
+      if (ui.awaitingFrame) {
+        clearTimeout(ui.slowOpenTimer);
+        setLoading(null, value >= 100 ? 'Starting playback…' : `Buffering ${Math.round(value)}%`,
+          Math.min(1, value / 100));
+        // Don't leave a frozen percentage on screen if buffering stalls
+        clearTimeout(ui.bufferStallTimer);
+        ui.bufferStallTimer = setTimeout(() => {
+          if (ui.awaitingFrame) setLoading(null, 'Waiting for the first picture…', null);
+        }, 1500);
+      }
+      break;
     case EV.PLAYING:
       setStatus(`Playing ${currentName}`);
       break;
@@ -292,15 +411,11 @@ function onPlayerEvent(kind, value) {
       break;
     case EV.ERROR:
       ui.loaded = false;
+      ui.awaitingFrame = false;
+      clearTimeout(ui.slowOpenTimer);
       fatal('Playback error',
         'VLC could not play this image. It may not be a DVD-Video disc, may be damaged, or may use a ' +
         'copy protection that cannot be handled. Open the browser console (and add ?debug to the URL) for details.');
-      break;
-    case EV.VOUT:
-      if (value > 0 && !ui.hasVideo) {
-        ui.hasVideo = true;
-        showOverlay(null);
-      }
       break;
   }
 }
@@ -406,11 +521,46 @@ function refreshUi() {
     el.selSpu.disabled = spu.length === 0;
   }
 
-  if (!ui.hasVideo && vlc.st(ST.VOUTS) > 0) {
-    ui.hasVideo = true;
-    showOverlay(null);
+  const dar = vlc.st(ST.VIDEO_DAR);
+  if (dar > 0.5 && dar < 4 && Math.abs(dar - ui.dar) > 0.01) {
+    ui.dar = dar;
+    layoutViewport();
   }
 }
+
+// --------------------------------------------------------------------------
+// Viewport: follow the video's aspect ratio
+// --------------------------------------------------------------------------
+
+// VLC renders into a fixed 16:9 surface, letterboxing or pillarboxing the
+// picture inside it. The stage takes the video's aspect ratio (CSS --dar);
+// the viewport is the largest rectangle of that aspect ratio in the stage (all
+// of it, except in fullscreen); the canvas is sized and centered so that the
+// picture inside the surface exactly covers the viewport.
+const SURFACE_AR = SURFACE_W / SURFACE_H;
+function layoutViewport() {
+  const dar = ui.dar;
+  el.stage.style.setProperty('--dar', dar.toFixed(4));
+  const W = el.stage.clientWidth;
+  const H = el.stage.clientHeight;
+  if (!W || !H) return;
+  const vw = Math.min(W, H * dar);
+  const vh = vw / dar;
+  Object.assign(el.viewport.style, {
+    left: `${(W - vw) / 2}px`, top: `${(H - vh) / 2}px`,
+    width: `${vw}px`, height: `${vh}px`, right: 'auto', bottom: 'auto',
+  });
+  // Canvas size: the picture covers the full surface height (pillarboxed,
+  // dar <= 16:9) or the full surface width (letterboxed)
+  const cw = dar <= SURFACE_AR ? vh * SURFACE_AR : vw;
+  const ch = cw / SURFACE_AR;
+  Object.assign(el.canvas.style, {
+    width: `${cw}px`, height: `${ch}px`,
+    left: `${(vw - cw) / 2}px`, top: `${(vh - ch) / 2}px`,
+  });
+}
+new ResizeObserver(layoutViewport).observe(el.stage);
+document.addEventListener('fullscreenchange', layoutViewport);
 
 setInterval(refreshUi, 250);
 

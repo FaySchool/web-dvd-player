@@ -26,7 +26,12 @@
 
   <main>
     <section id="stage" class="stage" tabindex="0" aria-label="DVD screen">
-      <canvas id="canvas" width="1280" height="720"></canvas>
+      <!-- The viewport has the aspect ratio of the DVD's video (4:3 or 16:9).
+           VLC renders into a fixed 16:9 surface (the canvas), which is
+           positioned so that only the picture shows in the viewport. -->
+      <div id="viewport" class="viewport">
+        <canvas id="canvas" width="1280" height="720"></canvas>
+      </div>
 
       <div id="dropzone" class="overlay dropzone">
         <div class="dropzone-inner">
@@ -39,8 +44,14 @@
       </div>
 
       <div id="loading" class="overlay loading hidden" role="status" aria-live="polite">
-        <div class="spinner" aria-hidden="true"></div>
-        <p id="loading-text">Loading VLC engine…</p>
+        <div class="loading-card">
+          <svg viewBox="0 0 64 64" class="loading-disc" aria-hidden="true"><circle cx="32" cy="32" r="30"/><circle cx="32" cy="32" r="9" class="hole"/><path d="M32 4a28 28 0 0 1 24 13.6" class="glint"/></svg>
+          <p id="loading-title" class="loading-title">Loading player…</p>
+          <div id="loading-bar" class="progress indeterminate" role="progressbar" aria-labelledby="loading-title">
+            <div id="loading-fill" class="progress-fill"></div>
+          </div>
+          <p id="loading-text" class="loading-detail"></p>
+        </div>
       </div>
 
       <div id="error" class="overlay error hidden" role="alert">

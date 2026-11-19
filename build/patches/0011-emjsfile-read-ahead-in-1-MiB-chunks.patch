@@ -1,0 +1,127 @@
+From 2f705b78fbdf4ec85bd74cd84f1e2d0c209c1471 Mon Sep 17 00:00:00 2001
+From: web-dvd-player <web-dvd-player@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 16:25:13 +0000
+Subject: [PATCH 11/11] emjsfile: read ahead in 1 MiB chunks
+
+Each synchronous read of the JS File costs ~0.5 ms whatever its size.
+libdvdcss seeks before every sector while recovering CSS title keys from
+a disc image, so opening a disc took seconds per title set. Serve small
+reads from a 1 MiB read-ahead buffer.
+---
+ modules/access/emjsfile.c | 77 ++++++++++++++++++++++++++++++++-------
+ 1 file changed, 63 insertions(+), 14 deletions(-)
+
+diff --git a/modules/access/emjsfile.c b/modules/access/emjsfile.c
+index 59078e3..0876937 100644
+--- a/modules/access/emjsfile.c
++++ b/modules/access/emjsfile.c
+@@ -28,15 +28,45 @@
+ #include <vlc_access.h>
+ #include <vlc_threads.h>
+ #include <stdalign.h>
++#include <string.h>
+ 
+ #include <emscripten.h>
+ 
++/* Each synchronous read of the JS File costs a fixed ~0.5 ms (a round trip
++ * to the browser's blob backend), whatever its size. Some readers issue many
++ * small reads at changing positions, which bypasses the stream cache:
++ * libdvdcss seeks before every sector when looking for the CSS title keys of
++ * a disc image (2000+ sectors per title set), which made opening a disc take
++ * seconds per title set. Read ahead in large chunks and serve small reads
++ * from memory. */
++#define READ_AHEAD_SIZE (1024 * 1024)
++
+ typedef struct
+ {
+     uint64_t offset;
+     uint64_t alignas(8) js_file_size;
++
++    uint8_t *cache;
++    uint64_t cache_start;
++    size_t   cache_len;
+ } access_sys_t;
+ 
++/* Read size bytes at offset from the JS File into buffer. */
++static int ReadFile(stream_t *p_access, uint64_t offset, uint8_t *buffer,
++                    size_t size)
++{
++    return EM_ASM_INT({
++        const offset = $0;
++        const buffer = $1;
++        const size = $2;
++        const acc = Module.vlcAccess[$3];
++        const blob = acc.worker_js_file.slice(offset, offset + size);
++        const data = new Uint8Array(acc.reader.readAsArrayBuffer(blob));
++        HEAPU8.set(data, buffer);
++        return data.length;
++    }, (double) offset, buffer, size, p_access);
++}
++
+ static ssize_t Read (stream_t *p_access, void *buffer, size_t size) {
+     access_sys_t *p_sys = p_access->p_sys;
+ 
+@@ -51,20 +81,36 @@ static ssize_t Read (stream_t *p_access, void *buffer, size_t size) {
+     if (size > js_file_size - offset)
+         size = js_file_size - offset;
+ 
+-    int read = EM_ASM_INT({
+-        const offset = $0;
+-        const buffer = $1;
+-        const size = $2;
+-        const acc = Module.vlcAccess[$3];
+-        const blob = acc.worker_js_file.slice(offset, offset + size);
+-        const data = new Uint8Array(acc.reader.readAsArrayBuffer(blob));
+-        HEAPU8.set(data, buffer);
+-        return data.length;
+-    }, (double) offset, buffer, size, p_access);
+-    if (read <= 0)
+-        return 0;
+-    p_sys->offset += read;
+-    return read;
++    if (offset < p_sys->cache_start
++     || offset >= p_sys->cache_start + p_sys->cache_len)
++    {
++        /* Large reads bypass the read-ahead buffer */
++        if (size >= READ_AHEAD_SIZE || p_sys->cache == NULL)
++        {
++            int read = ReadFile(p_access, offset, buffer, size);
++            if (read <= 0)
++                return 0;
++            p_sys->offset += read;
++            return read;
++        }
++
++        uint64_t len = js_file_size - offset;
++        if (len > READ_AHEAD_SIZE)
++            len = READ_AHEAD_SIZE;
++        p_sys->cache_len = 0;
++        int read = ReadFile(p_access, offset, p_sys->cache, len);
++        if (read <= 0)
++            return 0;
++        p_sys->cache_start = offset;
++        p_sys->cache_len = read;
++    }
++
++    size_t avail = p_sys->cache_start + p_sys->cache_len - offset;
++    if (size > avail)
++        size = avail;
++    memcpy(buffer, p_sys->cache + (offset - p_sys->cache_start), size);
++    p_sys->offset += size;
++    return size;
+ }
+ 
+ static int Seek (stream_t *p_access, uint64_t offset) {
+@@ -288,6 +334,9 @@ static int EmFileOpen( vlc_object_t *p_this ) {
+     p_access->p_sys = p_sys;
+     p_sys->js_file_size = 0;
+     p_sys->offset = 0;
++    p_sys->cache = vlc_obj_malloc(p_this, READ_AHEAD_SIZE);
++    p_sys->cache_start = 0;
++    p_sys->cache_len = 0;
+     if (get_js_file_size(p_access, &p_sys->js_file_size)) {
+         msg_Err(p_access, "EMJsFile error: could not get file size!");
+         EmFileClose(p_this);
+-- 
+2.43.0
+
