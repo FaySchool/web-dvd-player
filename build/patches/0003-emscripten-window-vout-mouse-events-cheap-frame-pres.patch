@@ -1,7 +1,7 @@
 From 77ba2d0ca0d52fea933e1b8e433a16a2e0c763b7 Mon Sep 17 00:00:00 2001
 From: web-dvd-player <web-dvd-player@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 16:14:26 +0000
-Subject: [PATCH 3/9] emscripten window/vout: mouse events, cheap frame
+Subject: [PATCH 03/10] emscripten window/vout: mouse events, cheap frame
  presentation
 
 - Forward mouse events from JS to the window (wasm_window_mouse_event),

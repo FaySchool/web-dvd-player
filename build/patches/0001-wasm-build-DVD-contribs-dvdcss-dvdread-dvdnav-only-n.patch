@@ -1,7 +1,7 @@
 From f1fe5972a753afb361c7aa78711315e80cd47747 Mon Sep 17 00:00:00 2001
 From: web-dvd-player <web-dvd-player@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 16:14:26 +0000
-Subject: [PATCH 1/9] wasm: build DVD contribs (dvdcss/dvdread/dvdnav), only
+Subject: [PATCH 01/10] wasm: build DVD contribs (dvdcss/dvdread/dvdnav), only
  needed contribs, fix download hosts
 
 ---

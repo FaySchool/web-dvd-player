@@ -1,7 +1,7 @@
 From d87480f149c2cc06816fb2034946e9ea1ab26f1a Mon Sep 17 00:00:00 2001
 From: web-dvd-player <web-dvd-player@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 18:34:34 +0000
-Subject: [PATCH 9/9] dvdnav: seek along the real playback path of titles
+Subject: [PATCH 09/10] dvdnav: seek along the real playback path of titles
 
 Structure-based copy protections place decoy cells (garbage or
 unreadable sectors) in the program chains of titles, which normal

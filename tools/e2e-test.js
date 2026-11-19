@@ -209,6 +209,37 @@ function check(name, ok, detail) {
         worst && `${worst.hz.toFixed(0)} Hz, jump ${worst.jump.toFixed(3)}`);
     }
 
+    // Subtitles must freeze with the picture: pause while a line (shown
+    // 2.5 s every 3 s in title 1) is on screen, it must still be there 3.5 s
+    // later, i.e. after the line's own display time.
+    const subtitleInk = () => page.evaluate(() => {
+      const c = document.createElement('canvas');
+      c.width = 1280; c.height = 720;
+      const g = c.getContext('2d');
+      g.drawImage(document.getElementById('canvas'), 0, 0);
+      const d = g.getImageData(300, 560, 680, 90).data;
+      let black = 0;
+      for (let i = 0; i < d.length; i += 4) if (d[i] < 20 && d[i + 1] < 20 && d[i + 2] < 20) black++;
+      return black; // the subtitle text outline is black; the test pattern has none there
+    });
+    await page.selectOption('#sel-title', '1');
+    await sleep(1500);
+    const spuIds = await page.evaluate(() => [...document.querySelectorAll('#sel-spu option')].map((o) => o.value));
+    if (spuIds[1]) await page.selectOption('#sel-spu', spuIds[1]);
+    for (let i = 0; i < 200; i++) {
+      const t = await page.evaluate(() => dvd.vlc.st(dvd.ST.TIME));
+      if (t > 3500 && t % 3000 > 1400 && t % 3000 < 1900) break;
+      await sleep(40);
+    }
+    await page.keyboard.press(' ');
+    await sleep(400);
+    const inkAtPause = await subtitleInk();
+    await sleep(3500);
+    const inkLater = await subtitleInk();
+    check('subtitles freeze while paused', inkAtPause > 1000 && inkLater > 1000, `ink ${inkAtPause} -> ${inkLater}`);
+    await page.keyboard.press(' ');
+    await sleep(500);
+
     // Title 4 hides a red decoy cell between two real cells (blue, green);
     // playback skips it through a cell command. Seeking must never land in it.
     const picture = () => page.evaluate(() => {

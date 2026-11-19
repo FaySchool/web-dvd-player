@@ -1,7 +1,7 @@
 From 51c3dbe40777993b3f447a9fdcdcbe5266a7cd69 Mon Sep 17 00:00:00 2001
 From: web-dvd-player <web-dvd-player@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 18:25:01 +0000
-Subject: [PATCH 8/9] dvdnav: run mouse navigation on the demux thread
+Subject: [PATCH 08/10] dvdnav: run mouse navigation on the demux thread
 
 EventMouse() is called on the video output thread. Activating a menu
 button can make libdvdnav read the disc (IFOs of another title set),

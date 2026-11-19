@@ -136,6 +136,10 @@ Patches on top of VLC + vlc.js (`build/patches/`):
 9. libdvdnav + dvdnav: time, duration and position along the real playback
    path of titles, excluding decoy cells (`dvdnav_safe_get_time()`,
    `dvdnav_safe_time_search()`).
+10. Decoder: pause the video output as soon as playback pauses (the video
+    decoder thread could stay blocked waiting for a picture buffer, so the
+    video output was never paused and subtitles kept advancing while the
+    picture was frozen).
 
 ### Building locally
 
@@ -155,8 +159,8 @@ buttons, four titles, chapters, stereo, mono and 5.1 AC-3 audio, a subtitle
 track, and a title with a decoy cell skipped by a cell command, like
 structure-protected discs) using ffmpeg, dvdauthor, ImageMagick and genisoimage. `tools/e2e-test.js`
 drives the player in headless Chromium against it (menu clicks, title end →
-menu, title and chapter changes, subtitles, pause, Menu/Resume, eject/re-open,
-seeking past the decoy cell) and analyses the audio output of each title's
+menu, title and chapter changes, subtitles (including freezing on pause),
+pause, Menu/Resume, eject/re-open, seeking past the decoy cell) and analyses the audio output of each title's
 test tone to check it is undistorted:
 
 ```bash

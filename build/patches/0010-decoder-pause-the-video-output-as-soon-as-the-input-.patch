@@ -1,0 +1,104 @@
+From e9708d62fa803a6d2b3fd0ecfbaf61882fea5019 Mon Sep 17 00:00:00 2001
+From: web-dvd-player <web-dvd-player@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 15:26:39 +0000
+Subject: [PATCH 10/10] decoder: pause the video output as soon as the input
+ pauses
+
+The video decoder thread only applies pause requests between two frames.
+It is commonly blocked meanwhile in picture_pool_Wait(): once the clock
+is paused, the video output stops consuming pictures, so the request
+was not applied until resume. The video output was never paused: it
+kept rendering subpictures against the wall clock, so subtitles kept
+advancing (next lines appearing, current line disappearing) while the
+picture was frozen.
+
+Apply the pause state to the video output right away from
+vlc_input_decoder_ChangePause(), keeping track of what was applied so
+that the decoder thread doesn't apply it twice.
+---
+ src/input/decoder.c | 34 ++++++++++++++++++++++++++++++++--
+ 1 file changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/src/input/decoder.c b/src/input/decoder.c
+index 62109bf..45f4212 100644
+--- a/src/input/decoder.c
++++ b/src/input/decoder.c
+@@ -135,6 +135,7 @@ struct vlc_input_decoder_t
+ 
+     vout_thread_t   *p_vout;
+     bool             vout_started;
++    bool             vout_paused; /* pause state applied to p_vout */
+     enum vlc_vout_order vout_order;
+ 
+     /* -- Theses variables need locking on read *and* write -- */
+@@ -499,6 +500,8 @@ static int ModuleThread_UpdateVideoFormat( decoder_t *p_dec, vlc_video_context *
+ 
+         vlc_mutex_lock( &p_owner->lock );
+         p_owner->vout_started = true;
++        if (vout_state == INPUT_RESOURCE_VOUT_STARTED)
++            p_owner->vout_paused = false;
+         vlc_mutex_unlock( &p_owner->lock );
+ 
+         if (vout_state == INPUT_RESOURCE_VOUT_STARTED)
+@@ -1548,6 +1551,20 @@ static void DecoderThread_Flush( vlc_input_decoder_t *p_owner )
+     vlc_mutex_unlock( &p_owner->lock );
+ }
+ 
++/* Apply the pause state to the video output, once. Call with p_owner->lock
++ * held. */
++static void DecoderApplyVoutPause( vlc_input_decoder_t *p_owner, bool paused,
++                                   vlc_tick_t date )
++{
++    vlc_mutex_assert( &p_owner->lock );
++    if( p_owner->p_vout != NULL && p_owner->vout_started
++     && p_owner->vout_paused != paused )
++    {
++        vout_ChangePause( p_owner->p_vout, paused, date );
++        p_owner->vout_paused = paused;
++    }
++}
++
+ static void DecoderThread_ChangePause( vlc_input_decoder_t *p_owner, bool paused, vlc_tick_t date )
+ {
+     decoder_t *p_dec = &p_owner->dec;
+@@ -1557,8 +1574,7 @@ static void DecoderThread_ChangePause( vlc_input_decoder_t *p_owner, bool paused
+     {
+         case VIDEO_ES:
+             vlc_mutex_lock( &p_owner->lock );
+-            if( p_owner->p_vout != NULL && p_owner->vout_started )
+-                vout_ChangePause( p_owner->p_vout, paused, date );
++            DecoderApplyVoutPause( p_owner, paused, date );
+             vlc_mutex_unlock( &p_owner->lock );
+             break;
+         case AUDIO_ES:
+@@ -1847,6 +1863,7 @@ CreateDecoder( vlc_object_t *p_parent, const es_format_t *fmt,
+     p_owner->p_astream = NULL;
+     p_owner->p_vout = NULL;
+     p_owner->vout_started = false;
++    p_owner->vout_paused = false;
+     p_owner->i_spu_channel = VOUT_SPU_CHANNEL_INVALID;
+     p_owner->i_spu_order = 0;
+     p_owner->p_sout = p_sout;
+@@ -2488,6 +2505,19 @@ void vlc_input_decoder_ChangePause( vlc_input_decoder_t *p_owner,
+     p_owner->frames_countdown = 0;
+     vlc_fifo_Signal( p_owner->p_fifo );
+     vlc_fifo_Unlock( p_owner->p_fifo );
++
++    /* The decoder thread only notices the request between two frames, and
++     * it may be blocked meanwhile waiting for a picture buffer, which the
++     * video output stops releasing once the clock is paused. Pause the video
++     * output right away: it must freeze its subpictures (rendered against
++     * the pause date) at the moment of the pause, not whenever the decoder
++     * thread wakes up. */
++    if( p_owner->dec.fmt_in.i_cat == VIDEO_ES )
++    {
++        vlc_mutex_lock( &p_owner->lock );
++        DecoderApplyVoutPause( p_owner, b_paused, i_date );
++        vlc_mutex_unlock( &p_owner->lock );
++    }
+ }
+ 
+ void vlc_input_decoder_ChangeRate( vlc_input_decoder_t *owner, float rate )
+-- 
+2.43.0
+
