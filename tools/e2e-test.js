@@ -227,17 +227,26 @@ function check(name, ok, detail) {
     const seekBar = await page.locator('#seek').boundingBox();
     const seekTo = (f) => page.mouse.click(seekBar.x + seekBar.width * f, seekBar.y + seekBar.height / 2);
     await seekTo(0.75);
-    await sleep(2000);
+    await page.waitForFunction(() => dvd.vlc.st(dvd.ST.SEEK_TARGET) < 0, null, { timeout: 20000 }).catch(() => {});
+    await sleep(500);
     s = await st();
     let pic = await picture();
     check('seek bar skips the decoy cell', pic === 'B' && s.time > 10000, `${pic}, ${JSON.stringify(s)}`);
     await seekTo(0.02);
     await sleep(1500);
     await page.keyboard.press('l');
-    await sleep(2000);
+    await page.waitForFunction(() => dvd.vlc.st(dvd.ST.SEEK_TARGET) < 0, null, { timeout: 20000 }).catch(() => {});
+    await sleep(500);
     s = await st();
     pic = await picture();
     check('+10 s skips the decoy cell', pic === 'B' && s.time > 10000, `${pic}, ${JSON.stringify(s)}`);
+    // Seeking backward goes through a chapter start, then fast-forwards
+    await seekTo(0.25);
+    await page.waitForFunction(() => dvd.vlc.st(dvd.ST.SEEK_TARGET) < 0, null, { timeout: 20000 }).catch(() => {});
+    await sleep(500);
+    s = await st();
+    pic = await picture();
+    check('backward seek lands before the decoy', pic === 'A' && s.time > 3000 && s.time < 7000, `${pic}, ${JSON.stringify(s)}`);
     await shot('5-protected-title');
   } catch (e) {
     check('scenario completed', false, e.message);

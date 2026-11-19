@@ -47,12 +47,12 @@ const CMD = {
   OPEN: 1, PLAY: 2, SET_PAUSE: 3, STOP: 4, SET_TIME: 5, SET_POSITION: 6,
   NAVIGATE: 7, SET_TITLE: 8, SET_CHAPTER: 9, NEXT_CHAPTER: 10, PREV_CHAPTER: 11,
   SELECT_TRACK: 12, SET_VOLUME: 13, SET_MUTE: 14, DEINTERLACE: 15, MOUSE: 16,
-  SET_RATE: 17, MENU: 18,
+  SET_RATE: 17, MENU: 18, SEEK: 19,
 };
 const ST = {
   STATE: 0, TIME: 1, LENGTH: 2, POSITION: 3, TITLE: 4, TITLE_COUNT: 5,
   CHAPTER: 6, CHAPTER_COUNT: 7, VOLUME: 8, MUTE: 9, SEEKABLE: 10, VOUTS: 11,
-  JSON_VERSION: 12, RATE: 13,
+  JSON_VERSION: 12, RATE: 13, SEEK_TARGET: 14,
 };
 const JSON_KIND = { titles: 0, audio: 1, spu: 2 };
 // libvlc_state_t
@@ -125,6 +125,7 @@ let currentName = '';
 const ui = {
   loaded: false,
   seeking: false,
+  seekShown: false,
   hasVideo: false,
   jsonVersion: -1,
 };
@@ -364,6 +365,17 @@ function refreshUi() {
   }
   el.timeLen.textContent = fmtTime(length);
 
+  // Seeking fast-forwards through the title (see dvdplayer.c): show it
+  const seekTarget = vlc.st(ST.SEEK_TARGET);
+  if (seekTarget >= 0) {
+    el.osd.textContent = `⏩ ${fmtTime(time)} → ${fmtTime(seekTarget)}`;
+    el.osd.classList.add('show');
+    ui.seekShown = true;
+  } else if (ui.seekShown) {
+    ui.seekShown = false;
+    el.osd.classList.remove('show');
+  }
+
   // Chapters (in the menu pseudo-title, "chapters" are the menu types)
   const chapters = [];
   for (let i = 0; i < Math.max(0, chapterCount); i++) {
@@ -407,7 +419,7 @@ el.seek.addEventListener('input', () => {
   el.timeCur.textContent = fmtTime((el.seek.value / 1000) * vlc.st(ST.LENGTH));
 });
 el.seek.addEventListener('change', () => {
-  vlc.cmd(CMD.SET_POSITION, 0, 0, 0, 0, el.seek.value / 1000);
+  seekTo((el.seek.value / 1000) * vlc.st(ST.LENGTH));
   // keep showing the requested position until the engine catches up
   setTimeout(() => { ui.seeking = false; }, 600);
 });
@@ -424,12 +436,21 @@ function osd(text) {
   osdTimer = setTimeout(() => el.osd.classList.remove('show'), 1200);
 }
 
-function seekBy(deltaMs) {
+// Seeking never jumps into the middle of a title: the engine jumps to a
+// chapter start if needed, then fast-forwards (8x) to the target, so that the
+// disc's own navigation runs as in normal playback (copy protections hide
+// decoy cells in titles that direct jumps can land in).
+function seekTo(timeMs) {
   const length = vlc.st(ST.LENGTH);
   if (!ui.loaded || isInMenu() || !(length > 0)) return;
-  const t = Math.max(0, Math.min(length - 1000, vlc.st(ST.TIME) + deltaMs));
-  vlc.cmd(CMD.SET_TIME, 0, 0, 0, 0, t);
-  osd(`${deltaMs > 0 ? '+' : '−'}${Math.abs(deltaMs / 1000)} s`);
+  vlc.cmd(CMD.SEEK, 0, 0, 0, 0, Math.max(0, Math.min(length - 1000, timeMs)));
+}
+
+function seekBy(deltaMs) {
+  // Repeated presses accumulate on top of a seek in progress
+  const target = vlc.st(ST.SEEK_TARGET);
+  seekTo((target >= 0 ? target : vlc.st(ST.TIME)) + deltaMs);
+  if (vlc.st(ST.SEEK_TARGET) < 0) osd(`${deltaMs > 0 ? '+' : '−'}${Math.abs(deltaMs / 1000)} s`);
 }
 
 function toggleFullscreen() {

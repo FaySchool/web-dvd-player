@@ -44,9 +44,21 @@ static libvlc_media_player_t *mp = NULL;
 enum {
     ST_STATE, ST_TIME, ST_LENGTH, ST_POSITION, ST_TITLE, ST_TITLE_COUNT,
     ST_CHAPTER, ST_CHAPTER_COUNT, ST_VOLUME, ST_MUTE, ST_SEEKABLE, ST_VOUTS,
-    ST_JSON_VERSION, ST_RATE, ST_COUNT
+    ST_JSON_VERSION, ST_RATE, ST_SEEK_TARGET, ST_COUNT
 };
 static double state[ST_COUNT];
+
+/* Playback time as reported by libvlc TimeChanged events, -1 if none yet.
+ * libvlc_media_player_get_time() is not reliable on DVDs: it restarts near
+ * 0 after timestamp discontinuities (cell changes skipping decoy cells...),
+ * while the events carry the actual position. */
+static double event_time = -1;
+
+static double current_time(void)
+{
+    double t = event_time;
+    return t >= 0 ? t : (double) libvlc_media_player_get_time(mp);
+}
 
 EMSCRIPTEN_KEEPALIVE double *dvd_state(void) { return state; }
 
@@ -76,6 +88,7 @@ enum {
     CMD_SET_POSITION, CMD_NAVIGATE, CMD_SET_TITLE, CMD_SET_CHAPTER,
     CMD_NEXT_CHAPTER, CMD_PREV_CHAPTER, CMD_SELECT_TRACK, CMD_SET_VOLUME,
     CMD_SET_MUTE, CMD_DEINTERLACE, CMD_MOUSE, CMD_SET_RATE, CMD_MENU,
+    CMD_SEEK,
 };
 
 typedef struct cmd {
@@ -163,11 +176,15 @@ static void on_event(const libvlc_event_t *ev, void *data)
             break;
         case libvlc_MediaPlayerPlaying:   kind = EV_PLAYING; break;
         case libvlc_MediaPlayerPaused:    kind = EV_PAUSED; break;
-        case libvlc_MediaPlayerStopped:   kind = EV_STOPPED; break;
+        case libvlc_MediaPlayerStopped:
+            kind = EV_STOPPED;
+            event_time = -1;
+            break;
         case libvlc_MediaPlayerEncounteredError: kind = EV_ERROR; break;
         case libvlc_MediaPlayerTimeChanged:
             kind = EV_TIME;
             value = (double) ev->u.media_player_time_changed.new_time;
+            event_time = value;
             state[ST_TIME] = value;
             break;
         case libvlc_MediaPlayerLengthChanged:
@@ -342,7 +359,7 @@ static void set_json(int which, char *s)
 static void refresh_state(bool full)
 {
     state[ST_STATE] = libvlc_media_player_get_state(mp);
-    state[ST_TIME] = (double) libvlc_media_player_get_time(mp);
+    state[ST_TIME] = current_time();
     state[ST_LENGTH] = (double) libvlc_media_player_get_length(mp);
     state[ST_POSITION] = libvlc_media_player_get_position(mp);
     state[ST_TITLE] = libvlc_media_player_get_title(mp);
@@ -361,12 +378,177 @@ static void refresh_state(bool full)
     }
 }
 
+/* ---------------------------------------------------------------------- */
+/* Seeking by fast-forwarding                                             */
+/* ---------------------------------------------------------------------- */
+
+/*
+ * Some discs protect titles with decoy cells (junk or unreadable video) that
+ * normal playback skips through the disc's own navigation commands, which
+ * may depend on state built up during playback. Any direct jump into the
+ * middle of a title risks landing in them. So seeking never jumps directly:
+ *  - jumps only to chapter starts (through the disc's chapter table, like
+ *    the remote's chapter buttons), when the target is behind the current
+ *    position or in a later chapter;
+ *  - then fast-forwards at SEEK_RATE until the target time, letting the
+ *    navigation VM play the title exactly as in normal playback.
+ */
+#define SEEK_RATE 8.f
+
+static struct
+{
+    enum { SEEK_IDLE, SEEK_SETTLE, SEEK_FORWARD } phase;
+    double target;          /* ms */
+    int title;
+    int chapter;            /* chapter jumped to (SETTLE) */
+    int attempts;
+    struct timespec since;  /* start of the current phase */
+} seek;
+
+static long ms_since(const struct timespec *t)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (now.tv_sec - t->tv_sec) * 1000 + (now.tv_nsec - t->tv_nsec) / 1000000;
+}
+
+static void seek_stop(void)
+{
+    if (seek.phase == SEEK_IDLE)
+        return;
+    if (libvlc_media_player_get_rate(mp) != 1.f)
+        libvlc_media_player_set_rate(mp, 1.f);
+    seek.phase = SEEK_IDLE;
+    state[ST_SEEK_TARGET] = -1;
+}
+
+/* Chapter (0-based) whose start is the last one at or before time (ms). */
+static int chapter_at(double time)
+{
+    libvlc_chapter_description_t **ch = NULL;
+    int title = libvlc_media_player_get_title(mp);
+    if (title < 0)
+        return 0;
+    /* Pass the title explicitly: this libVLC version does not implement the
+     * documented "-1 = current title" and would index out of bounds. */
+    int n = libvlc_media_player_get_full_chapter_descriptions(mp, title, &ch);
+    int found = 0;
+    for (int i = 0; i < n; i++)
+        if ((double) ch[i]->i_time_offset <= time)
+            found = i;
+    if (n > 0)
+        libvlc_chapter_descriptions_release(ch, (unsigned) n);
+    return found;
+}
+
+static void seek_start(double target)
+{
+    int title = libvlc_media_player_get_title(mp);
+    if (title <= 0) /* not in a title (menus) */
+        return;
+    double length = (double) libvlc_media_player_get_length(mp);
+    if (length > 0 && target > length - 1000)
+        target = length - 1000;
+    if (target < 0)
+        target = 0;
+
+    double now = current_time();
+    int target_chapter = chapter_at(target);
+    int cur_chapter = libvlc_media_player_get_chapter(mp);
+
+    if (libvlc_media_player_get_state(mp) == libvlc_Paused)
+        libvlc_media_player_set_pause(mp, 0);
+
+    seek.target = target;
+    seek.title = title;
+    seek.attempts = 0;
+    clock_gettime(CLOCK_MONOTONIC, &seek.since);
+    state[ST_SEEK_TARGET] = target;
+
+    if (target < now - 500 || target_chapter > cur_chapter)
+    {
+        if (libvlc_media_player_get_rate(mp) != 1.f)
+            libvlc_media_player_set_rate(mp, 1.f);
+        seek.chapter = target_chapter;
+        seek.phase = SEEK_SETTLE;
+        libvlc_media_player_set_chapter(mp, target_chapter);
+    }
+    else
+    {
+        seek.phase = SEEK_FORWARD;
+        libvlc_media_player_set_rate(mp, SEEK_RATE);
+    }
+}
+
+/* Called on every tick of the control thread while seeking. */
+static void seek_update(void)
+{
+    if (seek.phase == SEEK_IDLE)
+        return;
+
+    libvlc_state_t st = libvlc_media_player_get_state(mp);
+    if (libvlc_media_player_get_title(mp) != seek.title ||
+        (st != libvlc_Playing && st != libvlc_Opening && st != libvlc_Buffering))
+    {
+        /* Title ended (back to a menu), stopped, error... */
+        seek_stop();
+        return;
+    }
+
+    double now = current_time();
+    if (seek.phase == SEEK_SETTLE)
+    {
+        /* Give the chapter jump time to take effect */
+        long elapsed = ms_since(&seek.since);
+        if (elapsed < 400 || (elapsed < 3000 &&
+                              libvlc_media_player_get_chapter(mp) != seek.chapter))
+            return;
+        if (now > seek.target + 1000 && seek.chapter > 0 && seek.attempts < 3)
+        {
+            /* The chapter table start time was past the target: back one */
+            seek.chapter--;
+            seek.attempts++;
+            clock_gettime(CLOCK_MONOTONIC, &seek.since);
+            libvlc_media_player_set_chapter(mp, seek.chapter);
+            return;
+        }
+        if (now >= seek.target - 300)
+        {
+            seek_stop();
+            return;
+        }
+        seek.phase = SEEK_FORWARD;
+        libvlc_media_player_set_rate(mp, SEEK_RATE);
+        return;
+    }
+
+    /* SEEK_FORWARD: stop slightly early, a tick is ~400 ms of media at 8x */
+    if (now >= seek.target - 250)
+        seek_stop();
+}
+
 static void run_cmd(cmd_t *c)
 {
     switch (c->op)
     {
+        /* Commands that don't interrupt a seek in progress */
+        case CMD_SELECT_TRACK: case CMD_SET_VOLUME: case CMD_SET_MUTE:
+        case CMD_DEINTERLACE: case CMD_MOUSE: case CMD_SEEK:
+            break;
+        default:
+            seek_stop();
+            break;
+    }
+
+    switch (c->op)
+    {
+        case CMD_SEEK:
+            seek_stop();
+            seek_start(c->d);
+            break;
         case CMD_OPEN:
         {
+            event_time = -1;
             libvlc_media_t *m = libvlc_media_new_location(vlc, c->str);
             if (m == NULL)
                 break;
@@ -465,7 +647,7 @@ static void *control_thread(void *arg)
         {
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_nsec += 200 * 1000 * 1000;
+            ts.tv_nsec += (seek.phase != SEEK_IDLE ? 50 : 200) * 1000 * 1000;
             if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
             pthread_cond_timedwait(&q_wait, &q_lock, &ts);
         }
@@ -487,6 +669,7 @@ static void *control_thread(void *arg)
         }
         /* Cheap fields every tick, track/title lists when something changed
          * (and once a second as a safety net). */
+        seek_update();
         refresh_state(dirty || (++tick % 5) == 0);
     }
     return NULL;
@@ -502,6 +685,7 @@ int dvd_init(int argc, const char **argv)
     if (vlc != NULL)
         return 0;
     state[ST_TITLE] = state[ST_CHAPTER] = -1;
+    state[ST_SEEK_TARGET] = -1;
     vlc = libvlc_new(argc, argv);
     if (vlc == NULL)
     {

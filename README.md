@@ -18,11 +18,14 @@ is never loaded into memory as a whole, so dual-layer (> 4 GB) images work.
 - Titles and chapters (previous/next, pick from a list), seeking, pause, ±10 s.
 - **Protection-aware seeking**: some discs hide decoy cells (junk or
   unreadable video) inside a title, which normal playback skips through the
-  disc's own navigation commands, but a plain seek can land in. Seeking, the
-  seek bar and the displayed duration follow the cells that playback really
-  goes through: the title's navigation program is replayed from its start on
-  a copy of the player state (like fast-forwarding through the disc's logic,
-  without decoding video), and the player jumps to the resulting state.
+  disc's own navigation commands, but a direct jump can land in. Seeking (seek
+  bar, ±10 s) therefore never jumps into the middle of a title: it jumps to a
+  chapter start through the disc's chapter table (like the remote's chapter
+  buttons) when the target is behind or in a later chapter, then fast-forwards
+  at 8× to the target, so the disc's navigation runs exactly as in normal
+  playback. The displayed duration excludes decoy cells: the title's
+  navigation program is replayed on a copy of the player state to find the
+  cells really played.
 - Audio track and subtitle selection (DVD sub-pictures, including menu
   highlights), volume/mute, deinterlacing, fullscreen.
 - MPEG-2 video; AC-3, MPEG audio, LPCM and DTS audio (FFmpeg).
@@ -43,7 +46,7 @@ is never loaded into memory as a whole, so dual-layer (> 4 GB) images work.
 | <kbd>Backspace</kbd> / <kbd>Esc</kbd> | Leave the menu and resume playback |
 | <kbd>Space</kbd> | Play / pause |
 | <kbd>PageUp</kbd> / <kbd>PageDown</kbd> | Previous / next chapter |
-| <kbd>J</kbd> / <kbd>L</kbd> | Back / forward 10 seconds |
+| <kbd>J</kbd> / <kbd>L</kbd> | Back / forward 10 seconds (fast-forwards to the target) |
 | <kbd>F</kbd> | Fullscreen (or double-click the picture) |
 | <kbd>V</kbd> | Mute |
 
@@ -130,8 +133,9 @@ Patches on top of VLC + vlc.js (`build/patches/`):
    video stutter), a race-free flush, and pause without dropping audio.
 8. dvdnav: execute mouse clicks on menu buttons on the demux thread (they
    could deadlock playback when run on the video output thread).
-9. libdvdnav + dvdnav: seek along the real playback path of titles
-   (`dvdnav_safe_time_search()`), so seeking never lands in decoy cells.
+9. libdvdnav + dvdnav: time, duration and position along the real playback
+   path of titles, excluding decoy cells (`dvdnav_safe_get_time()`,
+   `dvdnav_safe_time_search()`).
 
 ### Building locally
 
