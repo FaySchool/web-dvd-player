@@ -1,0 +1,417 @@
+From 00df590722aff4b9bd788520fd8a41fac4d0eba2 Mon Sep 17 00:00:00 2001
+From: web-dvd-player <web-dvd-player@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 18:25:01 +0000
+Subject: [PATCH 07/10] emscripten aout: fixed output layout, flow control,
+ latency, pause
+
+- The AudioContext/worklet is created once with the first stream's
+  layout. Any later stream with a different channel count or rate
+  (stereo menu then mono feature, 5.1 trailers...) was fed to it
+  unconverted and played garbled. Always use a stereo worklet and make
+  every stream convert to its format and rate.
+- Fix STORAGE_SIZE (missing parentheses): 'x % STORAGE_SIZE' computed
+  '(x % 1024) * 1024', so the queue size was garbage.
+- Never overwrite samples that were not rendered yet: wait for space in
+  the ring buffer (dropping only if the AudioContext is not running).
+- Flush without racing with the worklet: the writer used to move head
+  back while the worklet was advancing tail, leaving the ring buffer
+  apparently full of stale data. Only the worklet moves tail now; a
+  flush is a request it applies.
+- Report the queued duration in time_get so that the core keeps audio in
+  sync and corrects clock drift. The browser renders in bursts, so report
+  a smoothed estimate (audio is the master clock: a jittery or wrong
+  latency makes the video stutter).
+- Pause outputs silence and keeps the queued samples instead of
+  discarding them.
+---
+ modules/audio_output/emscripten.c             | 212 +++++++++++++-----
+ .../webaudio/audio-worklet-processor.js       |  13 ++
+ modules/audio_output/webaudio/webaudio.h      |   8 +-
+ modules/audio_output/webaudio/webaudio.js     |  13 +-
+ 4 files changed, 186 insertions(+), 60 deletions(-)
+
+diff --git a/modules/audio_output/emscripten.c b/modules/audio_output/emscripten.c
+index 8819c34..7d22582 100644
+--- a/modules/audio_output/emscripten.c
++++ b/modules/audio_output/emscripten.c
+@@ -65,6 +65,12 @@ typedef struct aout_sys_t
+     */
+     atomic_uint init;
+ 
++    /* Latency estimation (see Time_Get) */
++    uint64_t written_frames;  /* frames queued since the last flush */
++    double   played_est;      /* smoothed estimate of the frames rendered */
++    vlc_tick_t est_date;
++    bool     est_valid;
++
+     // required by volume.h
+     bool soft_mute;
+     float soft_gain;
+@@ -72,16 +78,32 @@ typedef struct aout_sys_t
+ 
+ #include "volume.h"
+ 
++/* Bytes currently queued in the ring buffer (written, not yet rendered). */
++static uint32_t QueuedBytes(webaudio_buffer_t *sab)
++{
++    uint32_t head = atomic_load(&sab->head);
++    uint32_t tail;
++    /* A flush not applied by the worklet yet already counts as done */
++    if (atomic_load(&sab->flush_seq) != atomic_load(&sab->flush_ack))
++        tail = atomic_load(&sab->flush_pos);
++    else
++        tail = atomic_load(&sab->tail);
++    return (head + STORAGE_SIZE - tail) % STORAGE_SIZE;
++}
++
+ /*
+-  This function will clear the ring buffer in the shared array buffer.
+- */
++  Drop everything that is queued. Only the writer side (head) is touched,
++  the worklet owns tail.
++*/
+ static void Flush(audio_output_t *aout)
+ {
+     aout_sys_t *sys = (aout_sys_t *) aout->sys;
+-    emscripten_futex_wait(&sys->sab->can_write, 0, ATOMIC_WAIT_TIMEOUT);
+-    memset(sys->sab->storage, 0, sizeof(sys->sab->storage));
+-    atomic_store(&sys->sab->head, 0);
+-    atomic_store(&sys->sab->tail, 0);
++    /* Never move head backward (the worklet may be updating tail right
++     * now): ask the worklet to drop everything up to the current head. */
++    atomic_store(&sys->sab->flush_pos, atomic_load(&sys->sab->head));
++    atomic_fetch_add(&sys->sab->flush_seq, 1);
++    sys->written_frames = 0;
++    sys->est_valid = false;
+ }
+ 
+ static void Play(audio_output_t *aout, block_t *block, vlc_tick_t date)
+@@ -89,20 +111,46 @@ static void Play(audio_output_t *aout, block_t *block, vlc_tick_t date)
+     VLC_UNUSED(date);
+     aout_sys_t *sys = (aout_sys_t *) aout->sys;
+     int8_t *data = (int8_t *) block->p_buffer;
+-    size_t data_size = block->i_buffer;
+-    uint32_t head = atomic_load(&sys->sab->head);
+-    uint32_t tail = atomic_load(&sys->sab->tail);
+-    uint32_t new_head = (head + data_size) % STORAGE_SIZE;
+-
+-    if (new_head > tail) {
+-        /* 
+-           The worklet processor keeps rendering  until tail matches head
+-           it will be notified by an Atomics.notify() from the process() 
+-           callback.
+-        */
+-        emscripten_futex_wait(&sys->sab->can_write, 0, ATOMIC_WAIT_TIMEOUT);
++    size_t remaining = block->i_buffer;
++    /* Only ever queue whole frames, so that the worklet, which reads one
++     * sample per channel at a time, never sees a partial frame. */
++    const uint32_t frame_bytes = sys->channels * sizeof(float);
++    unsigned stalled_ms = 0;
++
++    while (remaining > 0)
++    {
++        /* Keep at least one frame free: head == tail means "empty" */
++        uint32_t free_bytes = STORAGE_SIZE - QueuedBytes(sys->sab) - frame_bytes;
++        free_bytes -= free_bytes % frame_bytes;
++
++        if (free_bytes == 0)
++        {
++            /* Ring buffer full: wait for the worklet to consume samples.
++             * It sets can_write to 1 and notifies after each render
++             * quantum. Never overwrite samples that were not played yet. */
++            if (stalled_ms >= 2000)
++            {
++                /* The AudioContext is not running (e.g. not unlocked by
++                 * a user gesture yet): drop audio rather than stalling
++                 * the decoder, and with it, the video. */
++                msg_Warn(aout, "audio output stalled, dropping %zu bytes",
++                         remaining);
++                break;
++            }
++            atomic_store(&sys->sab->can_write, 0);
++            if (QueuedBytes(sys->sab) + 2 * frame_bytes > STORAGE_SIZE)
++                emscripten_futex_wait(&sys->sab->can_write, 0, 50);
++            stalled_ms += 50;
++            continue;
++        }
++        stalled_ms = 0;
++
++        size_t chunk = remaining < free_bytes ? remaining : free_bytes;
++        webaudio_worklet_push(sys->sab, data, chunk);
++        sys->written_frames += chunk / frame_bytes;
++        data += chunk;
++        remaining -= chunk;
+     }
+-    webaudio_worklet_push(sys->sab, data, data_size);
+     block_Release(block);
+ }
+ 
+@@ -111,16 +159,59 @@ static void Pause(audio_output_t *aout, bool paused, vlc_tick_t date)
+     VLC_UNUSED(date);
+     aout_sys_t * sys = (aout_sys_t *) aout->sys;
+ 
+-    if (paused == false)
+-        atomic_store(&sys->sab->is_paused, 0);
+-    else
+-        atomic_store(&sys->sab->is_paused, 1);
+-    Flush(aout);
++    /* The worklet outputs silence while paused and keeps the queued
++     * samples, so that playback resumes seamlessly. */
++    atomic_store(&sys->sab->is_paused, paused ? 1 : 0);
++    sys->est_valid = false;
+ }
+ 
++/*
++  Report how long the queued samples will take to be rendered, so that the
++  audio output core keeps audio in sync with the clock and corrects the
++  drift between the AudioContext clock and the system clock.
++
++  The browser renders audio in bursts (several 128-frame quanta at once), so
++  the raw amount of queued samples jumps by tens of milliseconds. Since the
++  audio drives the playback clock, reporting it directly makes the clock,
++  and thus the video, stutter (frames are dropped as "late"). Instead,
++  model the rendering position as advancing at the nominal rate and slowly
++  correct it toward the measured one.
++*/
+ static int Time_Get(audio_output_t *aout, vlc_tick_t *delay)
+ {
+-    return aout_TimeGetDefault(aout, delay);
++    aout_sys_t *sys = (aout_sys_t *) aout->sys;
++
++    if (sys->channels == 0 || sys->sample_rate == 0)
++        return -1;
++
++    const uint32_t frame_bytes = sys->channels * sizeof(float);
++    const double rate = sys->sample_rate;
++    uint64_t queued = QueuedBytes(sys->sab) / frame_bytes;
++    uint64_t written = sys->written_frames;
++    double played = written > queued ? (double)(written - queued) : 0.;
++    vlc_tick_t now = vlc_tick_now();
++
++    if (!sys->est_valid || atomic_load(&sys->sab->is_paused))
++    {
++        sys->played_est = played;
++        sys->est_valid = true;
++    }
++    else
++    {
++        sys->played_est += (double)(now - sys->est_date) * rate / CLOCK_FREQ;
++        double err = played - sys->played_est;
++        if (err > rate / 4 || err < -rate / 4)
++            sys->played_est = played; /* discontinuity: underrun, stall... */
++        else
++            sys->played_est += err * 0.01;
++    }
++    if (sys->played_est > (double) written)
++        sys->played_est = written;
++    sys->est_date = now;
++
++    *delay = vlc_tick_from_samples(written - (uint64_t) sys->played_est,
++                                   sys->sample_rate);
++    return 0;
+ }
+ 
+ static void Close(vlc_object_t *obj)
+@@ -138,9 +229,9 @@ static void Close(vlc_object_t *obj)
+ */
+ static void Stop(audio_output_t *aout)
+ {
+-    Flush(aout);
+     aout_sys_t * sys = (aout_sys_t *) aout->sys;
+     atomic_store(&sys->sab->is_paused, 1);
++    Flush(aout);
+ }
+ 
+ /*
+@@ -156,7 +247,12 @@ static void Init(void *userData)
+     audio_output_t *aout = (audio_output_t *) userData;
+     aout_sys_t *sys = (aout_sys_t *) aout->sys;
+ 
+-    webaudio_init(sys->sample_rate, sys->channels, sys->sab, WEBAUDIO_LATENCY_PLAYBACK);
++    /* The AudioContext and its worklet are created once, for the whole
++     * session, with a fixed stereo layout: every stream is then converted
++     * to it by VLC (mono is duplicated on both channels, surround is
++     * downmixed). Creating the worklet with the first stream's channel
++     * count used to garble any later stream with a different layout. */
++    webaudio_init(sys->sample_rate, 2, sys->sab, WEBAUDIO_LATENCY_PLAYBACK);
+     unsigned rate = webaudio_getSampleRate();
+     unsigned channels = webaudio_getChannels();
+ 
+@@ -184,7 +280,7 @@ static int Start(audio_output_t *aout, audio_sample_format_t *restrict fmt)
+     aout_SoftVolumeStart(aout);
+     if (( nbChannels == 0 ) || !AOUT_FMT_LINEAR(fmt))
+         return VLC_EGENERIC;
+-    fmt->i_format = VLC_CODEC_FL32;
++
+     if (atomic_load(&sys->init) == false) {
+         sys->channels = nbChannels;
+         sys->sample_rate = fmt->i_rate;
+@@ -200,38 +296,40 @@ static int Start(audio_output_t *aout, audio_sample_format_t *restrict fmt)
+ 
+         // Wait until initialization ended.
+         vlc_atomic_wait(&sys->init, 0);
++    }
+ 
+-        if ((sys->channels == 0) && (sys->sample_rate == 0))
+-            return VLC_EGENERIC;
++    if ((sys->channels == 0) || (sys->sample_rate == 0))
++        return VLC_EGENERIC;
+ 
+-        // XXX: Still needs checks for correctness.
+-        // It looks like webaudio channels are treated in logical order.
+-        // As of today we didn't find any way to fetch the true channel mapping
+-        // of the browser so for now, lets remap naively in case of necessary
+-        // downmix.
+-        static const unsigned CHANNEL_MAPPING[] = {
+-            0,
+-            AOUT_CHAN_LEFT,
+-            AOUT_CHANS_2_0,
+-            AOUT_CHANS_2_1,
+-            AOUT_CHANS_4_0,
+-            AOUT_CHANS_5_0,
+-            AOUT_CHANS_5_1,
+-        };
+-
+-        if (fmt->i_channels > sys->channels)
+-        {
+-            msg_Info(aout, "Channel remapping necessary: %u -> %u", fmt->i_channels, sys->channels);
+-            if (unlikely(sys->channels > ARRAY_SIZE(CHANNEL_MAPPING)))
+-            {
+-                msg_Err(aout, "Unsupported mapping (channel count: %u)", sys->channels);
+-                return VLC_EGENERIC;
+-            }
+-            fmt->i_physical_channels = CHANNEL_MAPPING[sys->channels];
+-        }
+-        fmt->i_channels = sys->channels;
+-        fmt->i_rate = sys->sample_rate;
++    /* Whatever the source, output exactly what the worklet consumes:
++     * interleaved float32 frames of sys->channels channels at the
++     * AudioContext rate. The audio output core inserts the needed
++     * converters (remix, resample). */
++    static const uint32_t CHANNEL_LAYOUTS[] = {
++        0,
++        AOUT_CHAN_CENTER,
++        AOUT_CHANS_2_0,
++        AOUT_CHANS_2_1,
++        AOUT_CHANS_4_0,
++        AOUT_CHANS_5_0,
++        AOUT_CHANS_5_1,
++    };
++    if (sys->channels >= ARRAY_SIZE(CHANNEL_LAYOUTS))
++    {
++        msg_Err(aout, "Unsupported channel count: %u", sys->channels);
++        return VLC_EGENERIC;
+     }
++    if (nbChannels != sys->channels || fmt->i_rate != sys->sample_rate)
++        msg_Dbg(aout, "converting %u ch %u Hz to %u ch %u Hz", nbChannels,
++                fmt->i_rate, sys->channels, sys->sample_rate);
++
++    fmt->i_format = VLC_CODEC_FL32;
++    fmt->i_physical_channels = CHANNEL_LAYOUTS[sys->channels];
++    fmt->i_chan_mode = 0;
++    fmt->i_rate = sys->sample_rate;
++    aout_FormatPrepare(fmt);
++
++    Flush(aout);
+     atomic_store(&sys->sab->is_paused, 0);
+ 
+     return VLC_SUCCESS;
+diff --git a/modules/audio_output/webaudio/audio-worklet-processor.js b/modules/audio_output/webaudio/audio-worklet-processor.js
+index 5ec5c74..1bf8c7a 100644
+--- a/modules/audio_output/webaudio/audio-worklet-processor.js
++++ b/modules/audio_output/webaudio/audio-worklet-processor.js
+@@ -28,6 +28,9 @@ class Processor extends AudioWorkletProcessor {
+                 this.tail = e.data.tail;
+                 this.can_write = e.data.can_write;
+                 this.storage = e.data.storage;
++                this.flush_pos = e.data.flush_pos;
++                this.flush_seq = e.data.flush_seq;
++                this.flush_ack = e.data.flush_ack;
+                 this.port.postMessage( 'ready' );
+             } else {
+                 this.port.postMessage( 'error' );
+@@ -43,6 +46,16 @@ class Processor extends AudioWorkletProcessor {
+         if (this.head.buffer.byteLength === 0) {
+             throw new Error('wasmMemory grew');
+         }
++        /* Pending flush: drop everything written before flush_pos. Only
++         * this thread writes tail, so this cannot race with the writer. */
++        const seq = Atomics.load(this.flush_seq, 0);
++        if (seq !== Atomics.load(this.flush_ack, 0)) {
++            Atomics.store(this.tail, 0, Atomics.load(this.flush_pos, 0));
++            Atomics.store(this.flush_ack, 0, seq);
++        }
++        /* While paused, output silence but keep the buffered samples */
++        if (Atomics.load(this.is_paused, 0) !== 0)
++            return true;
+         var head = Atomics.load(this.head, 0) / 4;
+         var tail = Atomics.load(this.tail, 0) / 4;
+ 
+diff --git a/modules/audio_output/webaudio/webaudio.h b/modules/audio_output/webaudio/webaudio.h
+index 1553fea..8d4c4f6 100644
+--- a/modules/audio_output/webaudio/webaudio.h
++++ b/modules/audio_output/webaudio/webaudio.h
+@@ -26,7 +26,7 @@
+ #include <stdlib.h>
+ #include <stdatomic.h>
+ 
+-#define STORAGE_SIZE 1024 * 1024
++#define STORAGE_SIZE (1024 * 1024)
+ #define ATOMIC_WAIT_TIMEOUT 5000
+ 
+ typedef struct sound_buffer_t {
+@@ -35,6 +35,12 @@ typedef struct sound_buffer_t {
+     _Atomic uint32_t tail;
+     _Atomic uint32_t can_write;
+     int8_t storage[STORAGE_SIZE];
++    /* Flush requests: only the worklet moves tail. The writer publishes the
++     * position to drop up to (flush_pos), then bumps flush_seq; the worklet
++     * applies it and acknowledges with flush_ack. */
++    _Atomic uint32_t flush_pos;
++    _Atomic uint32_t flush_seq;
++    _Atomic uint32_t flush_ack;
+ } webaudio_buffer_t;
+ 
+ typedef enum indexes {
+diff --git a/modules/audio_output/webaudio/webaudio.js b/modules/audio_output/webaudio/webaudio.js
+index f291470..2a35238 100644
+--- a/modules/audio_output/webaudio/webaudio.js
++++ b/modules/audio_output/webaudio/webaudio.js
+@@ -25,9 +25,11 @@ mergeInto(LibraryManager.library, {
+         return Module.webaudioContext.sampleRate;
+     },
+     webaudio_getChannels: function() {
+-        if (Module.webaudioContext === undefined)
++        /* The channel count of the AudioWorkletNode, i.e. the number of
++         * interleaved samples per frame the worklet consumes. */
++        if (Module.webaudioContext === undefined || !Module.webaudioChannels)
+             return 0;
+-        return Module.webaudioContext.destination.channelCount;
++        return Module.webaudioChannels;
+     },
+     webaudio_init: async function (rate, channels, webaudio_buffer, latency) {
+         /*
+@@ -77,6 +79,10 @@ mergeInto(LibraryManager.library, {
+         webaudio_buffer += 4
+         
+         msg["storage"] = new Float32Array(wasmMemory.buffer, webaudio_buffer, STORAGE_SIZE / 4);
++        webaudio_buffer += STORAGE_SIZE;
++        msg["flush_pos"] = new Int32Array(wasmMemory.buffer, webaudio_buffer, 1);
++        msg["flush_seq"] = new Int32Array(wasmMemory.buffer, webaudio_buffer + 4, 1);
++        msg["flush_ack"] = new Int32Array(wasmMemory.buffer, webaudio_buffer + 8, 1);
+         
+         if (audioCtx.sampleRate != rate) {
+             console.error("desired rate unsupported by the browser, actual sample rate is: " + audioCtx.sampleRate);
+@@ -86,6 +92,9 @@ mergeInto(LibraryManager.library, {
+             console.error("Max number of channels of the browser is ", audioCtx.destination.maxChannelCount)
+             channels = audioCtx.destination.maxChannelCount;
+         }
++        if (channels < 1)
++            channels = 1;
++        Module.webaudioChannels = channels;
+ 
+         try {
+             await audioCtx.audioWorklet.addModule('./vlc/modules/audio_output/webaudio/audio-worklet-processor.js');
+-- 
+2.43.0
+

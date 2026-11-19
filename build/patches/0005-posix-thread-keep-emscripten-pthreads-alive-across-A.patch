@@ -1,0 +1,99 @@
+From d60f63314c318aa96f49c827351e8302120ccd58 Mon Sep 17 00:00:00 2001
+From: web-dvd-player <web-dvd-player@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 16:26:43 +0000
+Subject: [PATCH 05/10] posix/thread: keep emscripten pthreads alive across
+ ASYNCIFY suspensions
+
+VLC threads may suspend through EM_ASYNC_JS (vout WebGL setup, file
+access). When a pthread's entry point unwinds, emscripten considered the
+thread finished: pthread_join() returned early and the worker was
+recycled while the thread was only suspended, causing early joins,
+use-after-free ("table index is out of bounds") and 'only one main loop'
+aborts on DVD title changes.
+
+Hold a runtime keepalive while the thread body runs, and when the body
+returns from an ASYNCIFY rewind, terminate the pthread explicitly with
+_emscripten_thread_exit(). This replaces the emscripten_set_main_loop()
+workaround. Requires linking with -sEXIT_RUNTIME=1.
+---
+ src/posix/thread.c | 55 +++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 47 insertions(+), 8 deletions(-)
+
+diff --git a/src/posix/thread.c b/src/posix/thread.c
+index 9c7afdf..6fe11fd 100644
+--- a/src/posix/thread.c
++++ b/src/posix/thread.c
+@@ -130,23 +130,62 @@ void vlc_threads_setup (libvlc_int_t *p_libvlc)
+ }
+ #ifdef __EMSCRIPTEN__
+ #include <emscripten.h>
++#include <emscripten/eventloop.h>
+ typedef struct s_vlc_clone_data {
+     void *(*entry) (void *);
+     void *data;
+ } vlc_clone_data_t;
+ 
+-void vlc_js_runner(void *args) { VLC_UNUSED(args); }
++/* Internal emscripten function: marks the calling pthread as finished,
++ * wakes joiners and lets the worker be recycled. Unlike pthread_exit(), it
++ * does not throw to unwind the JS stack. */
++extern void _emscripten_thread_exit(void *result);
++
++/* Count the real ASYNCIFY suspensions (unwinds) of the thread hosted by
++ * this worker. Workers host one pthread at a time, so a per-worker counter
++ * reset at thread start is enough. */
++EM_JS(void, vlc_js_reset_unwinds, (void), {
++    if (!Asyncify.vlcWrapped) {
++        const handleSleep = Asyncify.handleSleep;
++        Asyncify.handleSleep = function(startAsync) {
++            const ret = handleSleep.call(Asyncify, startAsync);
++            if (Asyncify.state === Asyncify.State.Unwinding)
++                Asyncify.vlcUnwinds = (Asyncify.vlcUnwinds | 0) + 1;
++            return ret;
++        };
++        Asyncify.vlcWrapped = true;
++    }
++    Asyncify.vlcUnwinds = 0;
++    /* A previous thread of this worker that was cancelled while suspended
++     * never popped its keepalive: start from a clean state. */
++    runtimeKeepaliveCounter = 0;
++});
++
++EM_JS(int, vlc_js_unwinds, (void), {
++    return Asyncify.vlcUnwinds | 0;
++});
+ 
+ void *vlc_js_entry(void *args) {
+     vlc_clone_data_t *data = (vlc_clone_data_t *)args;
+-    /*
+-      don't simulate infinite loop to allow running
+-      the pthread entry point.
+-    */
+-    emscripten_set_main_loop_arg(vlc_js_runner, args, -1, 0);
+-    void *ret = data->entry(data->data);
+-    emscripten_cancel_main_loop();
++    void *(*entry)(void *) = data->entry;
++    void *opaque = data->data;
+     free(data);
++
++    /* VLC threads may suspend through ASYNCIFY (EM_ASYNC_JS). When that
++     * happens the entry point "returns" to JS early; without a keepalive
++     * emscripten would then consider the thread finished, wake its joiners
++     * and recycle the worker while the thread is merely suspended. */
++    vlc_js_reset_unwinds();
++    emscripten_runtime_keepalive_push();
++    void *ret = entry(opaque);
++    emscripten_runtime_keepalive_pop();
++
++    /* If the thread was suspended at least once, we are now running from an
++     * ASYNCIFY rewind and returning goes back to Asyncify, not to the pthread
++     * start code: terminate the thread explicitly. Otherwise
++     * invokeEntryPoint() handles the exit once we return. */
++    if (vlc_js_unwinds() > 0)
++        _emscripten_thread_exit(ret);
+     return ret;
+ }
+ 
+-- 
+2.43.0
+

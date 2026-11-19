@@ -1,0 +1,93 @@
+From 51c3dbe40777993b3f447a9fdcdcbe5266a7cd69 Mon Sep 17 00:00:00 2001
+From: web-dvd-player <web-dvd-player@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 18:25:01 +0000
+Subject: [PATCH 08/10] dvdnav: run mouse navigation on the demux thread
+
+EventMouse() is called on the video output thread. Activating a menu
+button can make libdvdnav read the disc (IFOs of another title set),
+which is not thread safe and, with the emscripten File access, fails
+outside the input thread's worker: the thread died holding the libdvdnav
+VM lock and playback deadlocked. Record mouse selection/activation and
+execute it from Demux() instead.
+---
+ modules/access/dvdnav.c | 47 ++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 39 insertions(+), 8 deletions(-)
+
+diff --git a/modules/access/dvdnav.c b/modules/access/dvdnav.c
+index 56e272d..f2db821 100644
+--- a/modules/access/dvdnav.c
++++ b/modules/access/dvdnav.c
+@@ -165,6 +165,15 @@ typedef struct
+     int         i_vobu_flush;
+ 
+     vlc_mouse_t oldmouse;
++
++    /* Mouse actions recorded by the video output thread, executed by the
++     * demux thread (protected by event_lock) */
++    struct
++    {
++        bool b_select;
++        bool b_activate;
++        int  i_x, i_y;
++    } mouse;
+ } demux_sys_t;
+ 
+ static int Control( demux_t *, int, va_list );
+@@ -874,6 +883,23 @@ static int Demux( demux_t *p_demux )
+     int i_len;
+     dvdnav_status_t status;
+ 
++    /* Mouse actions recorded by EventMouse() */
++    vlc_mutex_lock( &p_sys->event_lock );
++    bool b_select = p_sys->mouse.b_select, b_activate = p_sys->mouse.b_activate;
++    int i_mouse_x = p_sys->mouse.i_x, i_mouse_y = p_sys->mouse.i_y;
++    p_sys->mouse.b_select = p_sys->mouse.b_activate = false;
++    if( b_activate )
++        ButtonUpdate( p_demux, true );
++    vlc_mutex_unlock( &p_sys->event_lock );
++    if( b_select || b_activate )
++    {
++        pci_t *pci = dvdnav_get_current_nav_pci( p_sys->dvdnav );
++        if( b_activate )
++            dvdnav_mouse_activate( p_sys->dvdnav, pci, i_mouse_x, i_mouse_y );
++        else
++            dvdnav_mouse_select( p_sys->dvdnav, pci, i_mouse_x, i_mouse_y );
++    }
++
+     if( p_sys->b_readahead )
+         status = dvdnav_get_next_cache_block( p_sys->dvdnav, &packet, &i_event,
+                                               &i_len );
+@@ -1698,17 +1724,22 @@ static void EventMouse( const vlc_mouse_t *newmouse, void *p_data )
+         return;
+     }
+ 
+-    /* FIXME? PCI usage thread safe? */
+-    pci_t *pci = dvdnav_get_current_nav_pci( p_sys->dvdnav );
+-
+-    if( vlc_mouse_HasMoved( &p_sys->oldmouse, newmouse ) )
+-        dvdnav_mouse_select( p_sys->dvdnav, pci, newmouse->i_x, newmouse->i_y );
+-    if( vlc_mouse_HasPressed( &p_sys->oldmouse, newmouse, MOUSE_BUTTON_LEFT ) )
++    /* This runs on the video output thread. Activating a button may make
++     * libdvdnav read the disc (e.g. IFOs of another title set), which must
++     * only be done from the demux thread: the input stream is not thread
++     * safe (and with the emscripten File access, can only be read from the
++     * input thread's worker). Record the action for Demux() instead. */
++    bool b_move = vlc_mouse_HasMoved( &p_sys->oldmouse, newmouse );
++    bool b_press = vlc_mouse_HasPressed( &p_sys->oldmouse, newmouse,
++                                         MOUSE_BUTTON_LEFT );
++    if( b_move || b_press )
+     {
+         vlc_mutex_lock( &p_sys->event_lock );
+-        ButtonUpdate( p_demux, true );
++        p_sys->mouse.i_x = newmouse->i_x;
++        p_sys->mouse.i_y = newmouse->i_y;
++        p_sys->mouse.b_select |= b_move;
++        p_sys->mouse.b_activate |= b_press;
+         vlc_mutex_unlock( &p_sys->event_lock );
+-        dvdnav_mouse_activate( p_sys->dvdnav, pci, newmouse->i_x, newmouse->i_y );
+     }
+     p_sys->oldmouse = *newmouse;
+ }
+-- 
+2.43.0
+

@@ -1,0 +1,241 @@
+From f1fe5972a753afb361c7aa78711315e80cd47747 Mon Sep 17 00:00:00 2001
+From: web-dvd-player <web-dvd-player@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 16:14:26 +0000
+Subject: [PATCH 01/10] wasm: build DVD contribs (dvdcss/dvdread/dvdnav), only
+ needed contribs, fix download hosts
+
+---
+ .../dvdcss/0001-emscripten-no-ioctls.patch    | 113 ++++++++++++++++++
+ contrib/src/dvdcss/rules.mak                  |   1 +
+ .../src/dvdread/0001-emscripten-bswap.patch   |  11 ++
+ contrib/src/dvdread/rules.mak                 |   1 +
+ contrib/src/ffmpeg/rules.mak                  |   2 +-
+ contrib/src/main.mak                          |   4 +-
+ extras/package/wasm-emscripten/build.sh       |   7 +-
+ 7 files changed, 133 insertions(+), 6 deletions(-)
+ create mode 100644 contrib/src/dvdcss/0001-emscripten-no-ioctls.patch
+ create mode 100644 contrib/src/dvdread/0001-emscripten-bswap.patch
+
+diff --git a/contrib/src/dvdcss/0001-emscripten-no-ioctls.patch b/contrib/src/dvdcss/0001-emscripten-no-ioctls.patch
+new file mode 100644
+index 0000000..4b434de
+--- /dev/null
++++ b/contrib/src/dvdcss/0001-emscripten-no-ioctls.patch
+@@ -0,0 +1,113 @@
++diff -ru a/libdvdcss-1.4.3/src/ioctl.c b/libdvdcss-1.4.3/src/ioctl.c
++--- libdvdcss/src/ioctl.c	2026-11-18 16:06:05.392384364 +0000
+++++ libdvdcss.new/src/ioctl.c	2026-11-18 16:06:05.410214457 +0000
++@@ -219,6 +219,9 @@
++ 
++     *pi_copyright = p_buffer[ 4 ];
++ 
+++#elif defined(__EMSCRIPTEN__)
+++    /* No drive access in the browser: keys are cracked from the image */
+++    i_ret = -1;
++ #else
++ #   error "DVD ioctls are unavailable on this system"
++ 
++@@ -352,6 +355,9 @@
++ 
++     memcpy( p_key, p_buffer + 4, DVD_DISCKEY_SIZE );
++ 
+++#elif defined(__EMSCRIPTEN__)
+++    /* No drive access in the browser: keys are cracked from the image */
+++    i_ret = -1;
++ #else
++ #   error "DVD ioctls are unavailable on this system"
++ 
++@@ -482,6 +488,9 @@
++ 
++     memcpy( p_key, p_buffer + 5, DVD_KEY_SIZE );
++ 
+++#elif defined(__EMSCRIPTEN__)
+++    /* No drive access in the browser: keys are cracked from the image */
+++    i_ret = -1;
++ #else
++ #   error "DVD ioctls are unavailable on this system"
++ 
++@@ -579,6 +588,9 @@
++ 
++     *pi_agid = p_buffer[ 7 ] >> 6;
++ 
+++#elif defined(__EMSCRIPTEN__)
+++    /* No drive access in the browser: keys are cracked from the image */
+++    i_ret = -1;
++ #else
++ #   error "DVD ioctls are unavailable on this system"
++ 
++@@ -687,6 +699,9 @@
++ 
++     memcpy( p_challenge, p_buffer + 4, DVD_CHALLENGE_SIZE );
++ 
+++#elif defined(__EMSCRIPTEN__)
+++    /* No drive access in the browser: keys are cracked from the image */
+++    i_ret = -1;
++ #else
++ #   error "DVD ioctls are unavailable on this system"
++ 
++@@ -797,6 +812,9 @@
++ 
++     *pi_asf = p_buffer[ 7 ] & 1;
++ 
+++#elif defined(__EMSCRIPTEN__)
+++    /* No drive access in the browser: keys are cracked from the image */
+++    i_ret = -1;
++ #else
++ #   error "DVD ioctls are unavailable on this system"
++ 
++@@ -900,6 +918,9 @@
++ 
++     memcpy( p_key, p_buffer + 4, DVD_KEY_SIZE );
++ 
+++#elif defined(__EMSCRIPTEN__)
+++    /* No drive access in the browser: keys are cracked from the image */
+++    i_ret = -1;
++ #else
++ #   error "DVD ioctls are unavailable on this system"
++ 
++@@ -983,6 +1004,9 @@
++     i_ret = DosDevIOCtl(i_fd, IOCTL_CDROMDISK, CDROMDISK_EXECMD,
++                         &sdc, sizeof(sdc), &ulParamLen,
++                         NULL, 0, &ulDataLen);
+++#elif defined(__EMSCRIPTEN__)
+++    /* No drive access in the browser: keys are cracked from the image */
+++    i_ret = -1;
++ #else
++ #   error "DVD ioctls are unavailable on this system"
++ 
++@@ -1092,6 +1116,9 @@
++                          &sdc, sizeof(sdc), &ulParamLen,
++                          p_buffer, sizeof(p_buffer), &ulDataLen );
++ 
+++#elif defined(__EMSCRIPTEN__)
+++    /* No drive access in the browser: keys are cracked from the image */
+++    i_ret = -1;
++ #else
++ #   error "DVD ioctls are unavailable on this system"
++ 
++@@ -1201,6 +1228,9 @@
++                          &sdc, sizeof(sdc), &ulParamLen,
++                          p_buffer, sizeof(p_buffer), &ulDataLen );
++ 
+++#elif defined(__EMSCRIPTEN__)
+++    /* No drive access in the browser: keys are cracked from the image */
+++    i_ret = -1;
++ #else
++ #   error "DVD ioctls are unavailable on this system"
++ 
++@@ -1328,6 +1358,9 @@
++     *p_mask = p_buffer[ 5 ];
++     *p_scheme = p_buffer[ 6 ];
++ 
+++#elif defined(__EMSCRIPTEN__)
+++    /* No drive access in the browser: keys are cracked from the image */
+++    i_ret = -1;
++ #else
++ #   error "DVD ioctls are unavailable on this system"
++ 
+diff --git a/contrib/src/dvdcss/rules.mak b/contrib/src/dvdcss/rules.mak
+index 13709bc..d2c878e 100644
+--- a/contrib/src/dvdcss/rules.mak
++++ b/contrib/src/dvdcss/rules.mak
+@@ -14,6 +14,7 @@ $(TARBALLS)/libdvdcss-$(DVDCSS_VERSION).tar.bz2:
+ 
+ dvdcss: libdvdcss-$(DVDCSS_VERSION).tar.bz2 .sum-dvdcss
+ 	$(UNPACK)
++	$(APPLY) $(SRC)/dvdcss/0001-emscripten-no-ioctls.patch
+ 	$(MOVE)
+ 
+ .dvdcss: dvdcss
+diff --git a/contrib/src/dvdread/0001-emscripten-bswap.patch b/contrib/src/dvdread/0001-emscripten-bswap.patch
+new file mode 100644
+index 0000000..769f650
+--- /dev/null
++++ b/contrib/src/dvdread/0001-emscripten-bswap.patch
+@@ -0,0 +1,11 @@
++--- libdvdread/src/bswap.h
+++++ libdvdread.new/src/bswap.h
++@@ -37,7 +37,7 @@
++ #include <sys/param.h>
++ #endif
++ 
++-#if defined(__linux__) || defined(__GLIBC__)
+++#if defined(__linux__) || defined(__GLIBC__) || defined(__EMSCRIPTEN__)
++ #include <byteswap.h>
++ #define B2N_16(x) x = bswap_16(x)
++ #define B2N_32(x) x = bswap_32(x)
+diff --git a/contrib/src/dvdread/rules.mak b/contrib/src/dvdread/rules.mak
+index bcacd5d..daca78e 100644
+--- a/contrib/src/dvdread/rules.mak
++++ b/contrib/src/dvdread/rules.mak
+@@ -20,6 +20,7 @@ $(TARBALLS)/libdvdread-$(LIBDVDREAD_VERSION).tar.bz2:
+ 
+ dvdread: libdvdread-$(LIBDVDREAD_VERSION).tar.bz2 .sum-dvdread
+ 	$(UNPACK)
++	$(APPLY) $(SRC)/dvdread/0001-emscripten-bswap.patch
+ 	$(call pkg_static,"misc/dvdread.pc.in")
+ 	$(MOVE)
+ 
+diff --git a/contrib/src/ffmpeg/rules.mak b/contrib/src/ffmpeg/rules.mak
+index 1dcb2b4..0433c30 100644
+--- a/contrib/src/ffmpeg/rules.mak
++++ b/contrib/src/ffmpeg/rules.mak
+@@ -2,7 +2,7 @@
+ 
+ FFMPEG_HASH=dc91b913b6260e85e1304c74ff7bb3c22a8c9fb1
+ FFMPEG_BRANCH=release/4.4
+-FFMPEG_GITURL := http://git.videolan.org/git/ffmpeg.git
++FFMPEG_GITURL := https://github.com/FFmpeg/FFmpeg.git
+ FFMPEG_LAVC_MIN := 57.37.100
+ 
+ FFMPEG_BASENAME := $(subst .,_,$(subst \,_,$(subst /,_,$(FFMPEG_HASH))))
+diff --git a/contrib/src/main.mak b/contrib/src/main.mak
+index 3e7acc7..a0a856d 100644
+--- a/contrib/src/main.mak
++++ b/contrib/src/main.mak
+@@ -20,8 +20,8 @@ VPATH := $(TARBALLS)
+ # Common download locations
+ GNU ?= http://ftp.gnu.org/gnu
+ SF := https://netcologne.dl.sourceforge.net/
+-VIDEOLAN := http://downloads.videolan.org/pub/videolan
+-CONTRIB_VIDEOLAN := http://downloads.videolan.org/pub/contrib
++VIDEOLAN := https://download.videolan.org/pub/videolan
++CONTRIB_VIDEOLAN := https://download.videolan.org/pub/contrib
+ GITHUB := https://github.com/
+ GOOGLE_CODE := https://storage.googleapis.com/google-code-archive-downloads/v2/code.google.com
+ 
+diff --git a/extras/package/wasm-emscripten/build.sh b/extras/package/wasm-emscripten/build.sh
+index acd7459..4aad65d 100755
+--- a/extras/package/wasm-emscripten/build.sh
++++ b/extras/package/wasm-emscripten/build.sh
+@@ -112,7 +112,7 @@ mkdir -p "$VLC_SRCPATH"/contrib/contrib-emscripten
+ cd "$VLC_SRCPATH"/contrib/contrib-emscripten
+ 
+ diagnostic "vlc contribs: bootstrap"
+-../bootstrap --disable-disc --disable-sout --disable-net \
++../bootstrap --disable-bluray --disable-cddb --disable-sout --disable-net \
+             --disable-a52 --disable-aom --disable-faad2 --disable-chromaprint \
+             --disable-mad --disable-libmpeg2 --disable-nvcodec \
+             --disable-tremor --disable-vpx --disable-theora \
+@@ -130,7 +130,8 @@ diagnostic "vlc contribs: bootstrap"
+ 
+ diagnostic "vlc contribs: make"
+ if [ "$VLC_USE_PREBUILT_CONTRIBS" -eq "0" ]; then
+-    emmake make
++    # Only build the contribs needed for DVD playback
++    emmake make .zlib .ffmpeg .dvdcss .dvdread .dvdnav
+     if [ "$GENERATE_ARCHIVE" -eq "1" ]; then
+         diagnostic "vlc contribs: generating package"
+         emmake make package
+@@ -159,7 +160,7 @@ if [ $BUILD_MODE -eq 1 ]; then
+     # in tools/deps_info.py
+ 
+     # shm.h is a blacklisted module
+-    emconfigure "$VLC_SRCPATH"/configure --host=wasm32-unknown-emscripten --enable-debug \
++    emconfigure "$VLC_SRCPATH"/configure --host=wasm32-unknown-emscripten --disable-debug --enable-dvdnav --enable-dvdread \
+                         --disable-shared --disable-vlc \
+                         --disable-sout --disable-vlm --disable-a52 --disable-xcb --disable-lua \
+                         --disable-addonmanagermodules --disable-ssp --disable-nls \
+-- 
+2.43.0
+

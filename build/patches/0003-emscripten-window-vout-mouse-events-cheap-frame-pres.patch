@@ -1,0 +1,128 @@
+From 77ba2d0ca0d52fea933e1b8e433a16a2e0c763b7 Mon Sep 17 00:00:00 2001
+From: web-dvd-player <web-dvd-player@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 16:14:26 +0000
+Subject: [PATCH 03/10] emscripten window/vout: mouse events, cheap frame
+ presentation
+
+- Forward mouse events from JS to the window (wasm_window_mouse_event),
+  so DVD menu buttons can be hovered and clicked.
+- Present frames with an ImageBitmapRenderingContext
+  (transferFromImageBitmap) instead of copying them with a 2D drawImage
+  on the main thread. Frames posted to a busy main thread hold GPU
+  buffers the vout thread needs: with the copy, a loaded main thread made
+  the video output late (dropped frames, then decoder back-pressure,
+  late PCRs and rebuffering). Falls back to 2D, replacing (not blending)
+  the previous frame, which may have had another aspect ratio.
+---
+ modules/video_output/emscripten.cpp | 68 +++++++++++++++++++++++++----
+ 1 file changed, 60 insertions(+), 8 deletions(-)
+
+diff --git a/modules/video_output/emscripten.cpp b/modules/video_output/emscripten.cpp
+index e22342e..613ad7c 100644
+--- a/modules/video_output/emscripten.cpp
++++ b/modules/video_output/emscripten.cpp
+@@ -26,6 +26,7 @@
+ #endif
+ 
+ #include <cstdarg>
++#include <mutex>
+ #include <new>
+ #include <string>
+ 
+@@ -47,10 +48,43 @@
+ // eglGetProcAddress
+ #include <EGL/egl.h>
+ 
+-static const struct vout_window_operations ops = {
+-    //TODO: Implement canvas operations
+-    //vout_window_ReportSize() should be called from here
+-};
++/* The window currently displayed on the page canvas. Used to forward
++ * mouse events from JS (e.g. to click DVD menu buttons). */
++static std::mutex current_window_lock;
++static vout_window_t *current_window = nullptr;
++
++static void DestroyWindow(vout_window_t *wnd)
++{
++    current_window_lock.lock();
++    if (current_window == wnd)
++        current_window = nullptr;
++    current_window_lock.unlock();
++}
++
++static struct vout_window_operations ops;
++
++/* Called from JS with coordinates in window space (1280x720).
++ * type: 0 = move, 1 = press, 2 = release, 3 = double click */
++extern "C" EMSCRIPTEN_KEEPALIVE
++void wasm_window_mouse_event(int type, int x, int y, int button)
++{
++    current_window_lock.lock();
++    vout_window_t *wnd = current_window;
++    if (wnd != nullptr)
++    {
++        switch (type)
++        {
++            case 0: vout_window_ReportMouseMoved(wnd, x, y); break;
++            case 1:
++                vout_window_ReportMouseMoved(wnd, x, y);
++                vout_window_ReportMousePressed(wnd, button);
++                break;
++            case 2: vout_window_ReportMouseReleased(wnd, button); break;
++            case 3: vout_window_ReportMouseDoubleClick(wnd, button); break;
++        }
++    }
++    current_window_lock.unlock();
++}
+ 
+ //MAIN_THREAD_
+ //EM_JS(emscripten::EM_VAL, GetCanvasSize, (), {
+@@ -68,7 +102,11 @@ typedef struct emscripten_gl_sys_t
+ static int OpenWindow(vout_window_t *wnd)
+ {
+     wnd->type = VOUT_WINDOW_TYPE_EMSCRIPTEN_WEBGL;
++    ops.destroy = DestroyWindow;
+     wnd->ops = &ops;
++    current_window_lock.lock();
++    current_window = wnd;
++    current_window_lock.unlock();
+     wnd->handle.canvas = "canvas";
+ 
+     //emscripten::val size = GetCanvasSize();
+@@ -177,15 +215,29 @@ static int Open (vlc_gl_t *gl, unsigned width, unsigned height)
+ 
+     MAIN_THREAD_EM_ASM({
+         if (Module.canvasCtx === undefined) {
+-            let canvasName = UTF8ToString($1);
+-            Module.canvasCtx = document.getElementById(canvasName).getContext('2d');
++            let canvas = document.getElementById(UTF8ToString($1));
++            /* Hand frames over to the page canvas without copying them
++             * (ImageBitmapRenderingContext): presenting a frame must cost the
++             * main thread as little as possible, as unconsumed frames hold
++             * GPU buffers the video output thread needs. */
++            Module.canvasCtx = canvas.getContext('bitmaprenderer');
++            if (!Module.canvasCtx) {
++                Module.canvasCtx = canvas.getContext('2d');
++                /* Frames cover the whole surface (letterboxing included,
++                 * possibly transparent): replace, don't blend. */
++                Module.canvasCtx.globalCompositeOperation = 'copy';
++            }
+         }
+         function onVoutMessage(msg) {
+             let data = msg['data'];
+             if (data.customCmd == 'commitFrame') {
+                 let bmp = data['bitmap'];
+-                Module.canvasCtx.drawImage(bmp, 0, 0);
+-                bmp.close();
++                if (Module.canvasCtx.transferFromImageBitmap) {
++                    Module.canvasCtx.transferFromImageBitmap(bmp);
++                } else {
++                    Module.canvasCtx.drawImage(bmp, 0, 0);
++                    bmp.close();
++                }
+             }
+         }
+         let w = Module.PThread.pthreads[$0];
+-- 
+2.43.0
+

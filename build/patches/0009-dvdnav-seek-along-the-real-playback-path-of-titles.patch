@@ -1,0 +1,401 @@
+From d87480f149c2cc06816fb2034946e9ea1ab26f1a Mon Sep 17 00:00:00 2001
+From: web-dvd-player <web-dvd-player@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 18:34:34 +0000
+Subject: [PATCH 09/10] dvdnav: seek along the real playback path of titles
+
+Structure-based copy protections place decoy cells (garbage or
+unreadable sectors) in the program chains of titles, which normal
+playback skips through navigation commands. Seeking linearly in the
+program chain (seek bar, +/- jumps) could land in those cells.
+
+Add dvdnav_safe_time_search()/dvdnav_safe_get_time() to libdvdnav: the
+cells really played are found by running the title's navigation VM
+from its start on a copy (executing cell/pre/post commands, reading no
+video), and a seek replays the navigation up to the target cell and
+commits that VM state before positioning inside the cell. Use them for
+time, position and length in titles.
+---
+ ...02-seek-along-the-real-playback-path.patch | 283 ++++++++++++++++++
+ contrib/src/dvdnav/rules.mak                  |   1 +
+ modules/access/dvdnav.c                       |  49 +++
+ 3 files changed, 333 insertions(+)
+ create mode 100644 contrib/src/dvdnav/0002-seek-along-the-real-playback-path.patch
+
+diff --git a/contrib/src/dvdnav/0002-seek-along-the-real-playback-path.patch b/contrib/src/dvdnav/0002-seek-along-the-real-playback-path.patch
+new file mode 100644
+index 0000000..04ee15e
+--- /dev/null
++++ b/contrib/src/dvdnav/0002-seek-along-the-real-playback-path.patch
+@@ -0,0 +1,283 @@
++--- libdvdnav/src/dvdnav/dvdnav.h	2020-03-05 09:51:18.000000000 +0000
+++++ libdvdnav.new/src/dvdnav/dvdnav.h	2026-11-18 18:28:14.887965096 +0000
++@@ -410,6 +410,30 @@
++ int64_t dvdnav_get_current_time(dvdnav_t *self);
++ 
++ /*
+++ * Seeking along the real playback path of the current title.
+++ *
+++ * dvdnav_sector_search() and dvdnav_jump_to_sector_by_time() address the
+++ * cells of the current program chain linearly. Some discs (structure-based
+++ * copy protections) place decoy cells, with garbage or unreadable content,
+++ * in program chains, which normal playback skips through navigation
+++ * commands. A linear seek can land in such a cell.
+++ *
+++ * These functions instead derive the sequence of cells that playback
+++ * really goes through, by running the navigation VM of the title from its
+++ * start on a copy of the VM state (executing the cell, pre and post
+++ * commands, but reading no video), i.e. "fast forwarding" through the
+++ * disc's own logic. Seeking replays the navigation up to the target cell
+++ * and commits the resulting VM state (registers included), then positions
+++ * inside that cell. Times are in 90kHz units from the start of the title,
+++ * along that path.
+++ *
+++ * Only valid while playing a title (not in menus).
+++ */
+++dvdnav_status_t dvdnav_safe_time_search(dvdnav_t *self, int64_t time);
+++dvdnav_status_t dvdnav_safe_get_time(dvdnav_t *self, int64_t *time,
+++                                     int64_t *length);
+++
+++/*
++  * Stop playing the current position and start playback of the title
++  * from the specified timecode.
++  *
++--- libdvdnav/src/dvdnav.c	2026-11-18 18:29:01.426959659 +0000
+++++ libdvdnav.new/src/dvdnav.c	2026-11-18 18:28:14.885516753 +0000
++@@ -250,6 +250,9 @@
++     pthread_mutex_unlock(&this->vm_lock);
++   }
++ 
+++  free(this->play_map);
+++  this->play_map = NULL;
+++
++   /* Free the VM */
++   if(this->vm)
++     vm_free_vm(this->vm);
++--- libdvdnav/src/dvdnav_internal.h	2020-03-05 09:51:18.000000000 +0000
+++++ libdvdnav.new/src/dvdnav_internal.h	2026-11-18 18:28:14.885072420 +0000
++@@ -219,6 +219,13 @@
++ 
++   /* Errors */
++   char err_str[MAX_ERR_LEN];
+++
+++  /* Real playback path of the current title, see dvdnav_safe_time_search() */
+++  struct dvdnav_play_cell_s *play_map;
+++  int play_map_size;
+++  int play_map_vtsN;
+++  int play_map_ttn;
+++  int64_t play_map_length;
++ };
++ 
++ /** HELPER FUNCTIONS **/
++--- libdvdnav/src/searching.c	2020-03-05 09:51:18.000000000 +0000
+++++ libdvdnav.new/src/searching.c	2026-11-18 18:28:14.888372866 +0000
++@@ -1354,3 +1354,219 @@
++   return result;
++ }
++ 
+++
+++
+++/*
+++ * Real playback path of a title, see dvdnav.h.
+++ */
+++struct dvdnav_play_cell_s {
+++  int vtsN, pgcN, cellN;
+++  int64_t start;     /* 90kHz, along the playback path */
+++  int64_t duration;  /* 90kHz */
+++};
+++
+++#define PLAY_MAP_MAX_STEPS 4096
+++
+++/* Start a copy of the VM at the beginning of the title being played.
+++ * Returns NULL when not playing a title. Call with vm_lock held. */
+++static vm_t *play_map_start(dvdnav_t *this) {
+++  vm_t *copy;
+++  int ttn;
+++
+++  if (this->vm->state.domain != DVD_DOMAIN_VTSTitle || !this->vm->state.pgc)
+++    return NULL;
+++  ttn = this->vm->state.TTN_REG;
+++  copy = vm_new_copy(this->vm);
+++  if (!copy)
+++    return NULL;
+++  if (!vm_jump_title_part(copy, ttn, 1) || copy->stopped ||
+++      copy->state.domain != DVD_DOMAIN_VTSTitle) {
+++    vm_free_copy(copy);
+++    return NULL;
+++  }
+++  return copy;
+++}
+++
+++/* Is the copy still playing the cells of the same title? */
+++static int play_map_in_title(vm_t *copy, int vtsN, int ttn) {
+++  return !copy->stopped && copy->state.domain == DVD_DOMAIN_VTSTitle &&
+++         copy->state.pgc && copy->state.vtsN == vtsN &&
+++         copy->state.TTN_REG == ttn &&
+++         copy->state.cellN >= 1 &&
+++         copy->state.cellN <= copy->state.pgc->nr_of_cells;
+++}
+++
+++/* (Re)build the map of the current title if needed. Call with vm_lock held. */
+++static int play_map_update(dvdnav_t *this) {
+++  vm_t *copy;
+++  int vtsN, ttn, size = 0, alloc = 0;
+++  int64_t total = 0;
+++  struct dvdnav_play_cell_s *map = NULL;
+++
+++  if (this->vm->state.domain != DVD_DOMAIN_VTSTitle)
+++    return 0;
+++  vtsN = this->vm->state.vtsN;
+++  ttn = this->vm->state.TTN_REG;
+++  if (this->play_map && this->play_map_vtsN == vtsN && this->play_map_ttn == ttn)
+++    return 1;
+++
+++  free(this->play_map);
+++  this->play_map = NULL;
+++  this->play_map_size = 0;
+++  this->play_map_length = 0;
+++
+++  copy = play_map_start(this);
+++  if (!copy)
+++    return 0;
+++
+++  for (int step = 0; step < PLAY_MAP_MAX_STEPS && play_map_in_title(copy, vtsN, ttn); step++) {
+++    cell_playback_t *cell = &copy->state.pgc->cell_playback[copy->state.cellN - 1];
+++    int i;
+++
+++    /* Stop on loops: a cell already visited means the title repeats */
+++    for (i = 0; i < size; i++)
+++      if (map[i].pgcN == copy->state.pgcN && map[i].cellN == copy->state.cellN)
+++        break;
+++    if (i < size)
+++      break;
+++
+++    if (size == alloc) {
+++      struct dvdnav_play_cell_s *tmp;
+++      alloc = alloc ? alloc * 2 : 64;
+++      tmp = realloc(map, alloc * sizeof(*map));
+++      if (!tmp)
+++        break;
+++      map = tmp;
+++    }
+++    map[size].vtsN = copy->state.vtsN;
+++    map[size].pgcN = copy->state.pgcN;
+++    map[size].cellN = copy->state.cellN;
+++    map[size].start = total;
+++    map[size].duration = dvdnav_convert_time(&cell->playback_time);
+++    total += map[size].duration;
+++    size++;
+++
+++    vm_get_next_cell(copy);
+++  }
+++  vm_free_copy(copy);
+++
+++  if (size == 0 || total <= 0) {
+++    free(map);
+++    return 0;
+++  }
+++  this->play_map = map;
+++  this->play_map_size = size;
+++  this->play_map_vtsN = vtsN;
+++  this->play_map_ttn = ttn;
+++  this->play_map_length = total;
+++  Log2(this, "playback path of title %d: %d cells, %" PRId64 " s", ttn, size,
+++       total / 90000);
+++  return 1;
+++}
+++
+++dvdnav_status_t dvdnav_safe_get_time(dvdnav_t *this, int64_t *time,
+++                                     int64_t *length) {
+++  dvd_state_t *state;
+++
+++  pthread_mutex_lock(&this->vm_lock);
+++  if (!play_map_update(this)) {
+++    pthread_mutex_unlock(&this->vm_lock);
+++    return DVDNAV_STATUS_ERR;
+++  }
+++  state = &this->vm->state;
+++  *length = this->play_map_length;
+++  *time = -1;
+++  for (int i = 0; i < this->play_map_size; i++) {
+++    if (this->play_map[i].pgcN == state->pgcN &&
+++        this->play_map[i].cellN == state->cellN) {
+++      int64_t in_cell = this->cur_cell_time;
+++      if (in_cell < 0)
+++        in_cell = 0;
+++      if (in_cell > this->play_map[i].duration)
+++        in_cell = this->play_map[i].duration;
+++      *time = this->play_map[i].start + in_cell;
+++      break;
+++    }
+++  }
+++  pthread_mutex_unlock(&this->vm_lock);
+++  /* Current cell not on the path (e.g. played after a jump the map could
+++   * not predict): the position is unknown */
+++  return *time >= 0 ? DVDNAV_STATUS_OK : DVDNAV_STATUS_ERR;
+++}
+++
+++dvdnav_status_t dvdnav_safe_time_search(dvdnav_t *this, int64_t time) {
+++  vm_t *copy;
+++  int target = -1, vtsN, ttn;
+++  int64_t offset;
+++  cell_playback_t *cell;
+++  uint32_t sector, vobu;
+++
+++  if (this->position_current.still != 0) {
+++    printerr("Cannot seek in a still frame.");
+++    return DVDNAV_STATUS_ERR;
+++  }
+++
+++  pthread_mutex_lock(&this->vm_lock);
+++  if (!play_map_update(this)) {
+++    printerr("No playback path for the current title.");
+++    pthread_mutex_unlock(&this->vm_lock);
+++    return DVDNAV_STATUS_ERR;
+++  }
+++
+++  if (time < 0)
+++    time = 0;
+++  for (int i = 0; i < this->play_map_size; i++) {
+++    if (time < this->play_map[i].start + this->play_map[i].duration) {
+++      target = i;
+++      break;
+++    }
+++  }
+++  if (target < 0) {
+++    printerr("Request to seek behind end.");
+++    pthread_mutex_unlock(&this->vm_lock);
+++    return DVDNAV_STATUS_ERR;
+++  }
+++  offset = time - this->play_map[target].start;
+++  vtsN = this->play_map_vtsN;
+++  ttn = this->play_map_ttn;
+++
+++  /* Replay the navigation from the start of the title to the target cell */
+++  copy = play_map_start(this);
+++  if (!copy) {
+++    printerr("Cannot replay the title navigation.");
+++    pthread_mutex_unlock(&this->vm_lock);
+++    return DVDNAV_STATUS_ERR;
+++  }
+++  for (int i = 0; i < target && play_map_in_title(copy, vtsN, ttn); i++)
+++    vm_get_next_cell(copy);
+++  if (!play_map_in_title(copy, vtsN, ttn) ||
+++      copy->state.pgcN != this->play_map[target].pgcN ||
+++      copy->state.cellN != this->play_map[target].cellN) {
+++    /* The navigation did not follow the same path again */
+++    vm_free_copy(copy);
+++    free(this->play_map);
+++    this->play_map = NULL;
+++    printerr("Playback path changed, cannot seek.");
+++    pthread_mutex_unlock(&this->vm_lock);
+++    return DVDNAV_STATUS_ERR;
+++  }
+++  vm_merge(this->vm, copy);
+++  vm_free_copy(copy);
+++
+++  /* Position inside the cell, proportionally to the time offset, on a
+++   * VOBU boundary. The whole cell is on the playback path. */
+++  cell = &this->vm->state.pgc->cell_playback[this->vm->state.cellN - 1];
+++  sector = cell->first_sector;
+++  if (this->play_map[target].duration > 0 && cell->last_sector > cell->first_sector)
+++    sector += (uint32_t)((cell->last_sector - cell->first_sector) *
+++                         offset / this->play_map[target].duration);
+++  if (dvdnav_scan_admap(this, this->vm->state.domain, sector, 0, &vobu) != DVDNAV_STATUS_OK ||
+++      vobu < cell->first_sector || vobu > cell->last_sector)
+++    vobu = cell->first_sector;
+++  vm_jump_cell_block(this->vm, this->vm->state.cellN, vobu - cell->first_sector);
+++
+++  this->vm->hop_channel += HOP_SEEK;
+++  this->position_current.still = 0;
+++  pthread_mutex_unlock(&this->vm_lock);
+++  return DVDNAV_STATUS_OK;
+++}
+diff --git a/contrib/src/dvdnav/rules.mak b/contrib/src/dvdnav/rules.mak
+index 9daed8d..43bbbac 100644
+--- a/contrib/src/dvdnav/rules.mak
++++ b/contrib/src/dvdnav/rules.mak
+@@ -22,6 +22,7 @@ $(TARBALLS)/libdvdnav-$(LIBDVDNAV_VERSION).tar.bz2:
+ dvdnav: libdvdnav-$(LIBDVDNAV_VERSION).tar.bz2 .sum-dvdnav
+ 	$(UNPACK)
+ 	$(APPLY) $(SRC)/dvdnav/0001-reset-still-skip-on-hop.patch
++	$(APPLY) $(SRC)/dvdnav/0002-seek-along-the-real-playback-path.patch
+ 	$(call pkg_static,"misc/dvdnav.pc.in")
+ 	$(MOVE)
+ 
+diff --git a/modules/access/dvdnav.c b/modules/access/dvdnav.c
+index f2db821..1c0c9a8 100644
+--- a/modules/access/dvdnav.c
++++ b/modules/access/dvdnav.c
+@@ -614,6 +614,35 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+         case DEMUX_GET_POSITION:
+         case DEMUX_GET_LENGTH:
+         {
++            /* In titles, measure and seek along the cells that playback
++             * really goes through (see dvdnav_safe_time_search()): a linear
++             * seek in the program chain can land in decoy cells of
++             * structure-protected discs. */
++            int64_t i_safe_time, i_safe_length;
++            if( dvdnav_safe_get_time( p_sys->dvdnav, &i_safe_time,
++                                      &i_safe_length ) == DVDNAV_STATUS_OK
++             && i_safe_length > 0 )
++            {
++                switch( i_query )
++                {
++                case DEMUX_GET_POSITION:
++                    *va_arg( args, double* ) =
++                        (double)i_safe_time / (double)i_safe_length;
++                    return VLC_SUCCESS;
++                case DEMUX_SET_POSITION:
++                {
++                    double f_pos = va_arg( args, double );
++                    RandomAccessCleanup( p_sys );
++                    return dvdnav_safe_time_search( p_sys->dvdnav,
++                                (int64_t)(f_pos * i_safe_length) )
++                           == DVDNAV_STATUS_OK ? VLC_SUCCESS : VLC_EGENERIC;
++                }
++                case DEMUX_GET_LENGTH:
++                    *va_arg( args, vlc_tick_t * ) = i_safe_length * 100 / 9;
++                    return VLC_SUCCESS;
++                }
++            }
++
+             uint32_t pos, len;
+             if( dvdnav_get_position( p_sys->dvdnav, &pos, &len ) !=
+                   DVDNAV_STATUS_OK || len == 0 )
+@@ -649,6 +678,15 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+         }
+ 
+         case DEMUX_GET_TIME:
++        {
++            int64_t i_safe_time, i_safe_length;
++            if( dvdnav_safe_get_time( p_sys->dvdnav, &i_safe_time,
++                                      &i_safe_length ) == DVDNAV_STATUS_OK )
++            {
++                *va_arg( args, vlc_tick_t * ) = i_safe_time * 100 / 9;
++                return VLC_SUCCESS;
++            }
++        }
+             if( p_sys->i_pgc_length > 0 )
+             {
+                 *va_arg( args, vlc_tick_t * ) =
+@@ -660,6 +698,17 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+         case DEMUX_SET_TIME:
+         {
+             vlc_tick_t i_time = va_arg( args, vlc_tick_t );
++            int64_t i_safe_time, i_safe_length;
++            if( dvdnav_safe_get_time( p_sys->dvdnav, &i_safe_time,
++                                      &i_safe_length ) == DVDNAV_STATUS_OK )
++            {
++                RandomAccessCleanup( p_sys );
++                if( dvdnav_safe_time_search( p_sys->dvdnav, i_time * 9 / 100 )
++                        == DVDNAV_STATUS_OK )
++                    return VLC_SUCCESS;
++                msg_Err( p_demux, "can't set time to %" PRId64, i_time );
++                return VLC_EGENERIC;
++            }
+             if( dvdnav_jump_to_sector_by_time( p_sys->dvdnav,
+                                                i_time * 9 / 100,
+                                                SEEK_SET ) == DVDNAV_STATUS_OK )
+-- 
+2.43.0
+

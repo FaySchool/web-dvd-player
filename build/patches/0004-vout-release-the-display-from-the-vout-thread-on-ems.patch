@@ -1,0 +1,71 @@
+From c56eaff794133081ad33153d469f25b8d03bca41 Mon Sep 17 00:00:00 2001
+From: web-dvd-player <web-dvd-player@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 16:23:23 +0000
+Subject: [PATCH 04/10] vout: release the display from the vout thread on
+ emscripten
+
+The WebGL context lives in the worker running the vout thread; closing
+the display from the thread calling vout_StopDisplay() crashed in
+glFinish (no current context) on every title change. Also handle a
+failed vout_Start() in the thread.
+---
+ src/video_output/video_output.c | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/src/video_output/video_output.c b/src/video_output/video_output.c
+index 8b8ce5f..524ed26 100644
+--- a/src/video_output/video_output.c
++++ b/src/video_output/video_output.c
+@@ -1714,6 +1714,7 @@ error:
+ 
+ 
+ static void vout_DisableWindow(vout_thread_sys_t *sys);
++static void vout_ReleaseDisplay(vout_thread_sys_t *vout);
+ /*****************************************************************************
+  * Thread: video output thread
+  *****************************************************************************
+@@ -1763,6 +1764,12 @@ static void *Thread(void *object)
+ 
+         vout_SetInterlacingState(&vout->obj, &sys->private, picture_interlaced);
+     }
++#ifdef __EMSCRIPTEN__
++    /* The display (and its WebGL context) is bound to this thread's worker:
++     * it must be released here, not from the thread calling
++     * vout_StopDisplay(). */
++    vout_ReleaseDisplay(vout);
++#endif
+     return NULL;
+ }
+ 
+@@ -1823,7 +1830,9 @@ void vout_StopDisplay(vout_thread_t *vout)
+     vout_control_Wake(&sys->control);
+     vlc_join(sys->thread, NULL);
+ 
++#ifndef __EMSCRIPTEN__
+     vout_ReleaseDisplay(sys);
++#endif
+ }
+ 
+ static void vout_DisableWindow(vout_thread_sys_t *sys)
+@@ -2135,11 +2144,17 @@ int vout_Request(const vout_configuration_t *cfg, vlc_video_context *vctx, input
+ 
+     atomic_store(&sys->control_is_terminated, false);
+     if (vlc_clone(&sys->thread, Thread, vout, VLC_THREAD_PRIORITY_OUTPUT)) {
+-        vout_ReleaseDisplay(vout);
++        /* The display is started from the vout thread: nothing to release */
+         vout_DisableWindow(vout);
+         return -1;
+     }
+     vlc_sem_wait(&sys->thread_ready_sem);
++    if (!sys->thread_success)
++    {
++        /* vout_Start() failed in the thread, which already exited */
++        vlc_join(sys->thread, NULL);
++        return -1;
++    }
+ 
+     if (input != NULL && sys->spu)
+         spu_Attach(sys->spu, input);
+-- 
+2.43.0
+

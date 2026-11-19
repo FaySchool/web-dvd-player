@@ -1,0 +1,4 @@
+patches_sha256=ab0bfd6f3ac4a13b
+vlc_base=06e361b127e4609e429909756212ed5e30e7d032
+emsdk=3.1.18
+built=2026-11-19T16:15:57Z

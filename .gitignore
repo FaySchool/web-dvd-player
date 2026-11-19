@@ -1,0 +1,6 @@
+# Toolchain, sources and build trees fetched by build/build.sh
+build/work/
+
+node_modules/
+*.iso
+*.cdr

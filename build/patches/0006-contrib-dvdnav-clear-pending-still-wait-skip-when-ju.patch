@@ -1,0 +1,53 @@
+From 3d4675be99ec64c4465d6e31d6eb49c74e5e936e Mon Sep 17 00:00:00 2001
+From: web-dvd-player <web-dvd-player@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 17:36:51 +0000
+Subject: [PATCH 06/10] contrib: dvdnav: clear pending still/wait skip when
+ jumping
+
+VLC calls dvdnav_still_skip() before dvdnav_title_play()/part_play(). The
+skip flag was only cleared at the next end of cell, so calling a menu
+during the first cell of a title started that way skipped the menu's
+still frame and playback stopped at the end of the menu PGC.
+---
+ .../dvdnav/0001-reset-still-skip-on-hop.patch    | 16 ++++++++++++++++
+ contrib/src/dvdnav/rules.mak                     |  1 +
+ 2 files changed, 17 insertions(+)
+ create mode 100644 contrib/src/dvdnav/0001-reset-still-skip-on-hop.patch
+
+diff --git a/contrib/src/dvdnav/0001-reset-still-skip-on-hop.patch b/contrib/src/dvdnav/0001-reset-still-skip-on-hop.patch
+new file mode 100644
+index 0000000..009659d
+--- /dev/null
++++ b/contrib/src/dvdnav/0001-reset-still-skip-on-hop.patch
+@@ -0,0 +1,16 @@
++--- libdvdnav/src/dvdnav.c
+++++ libdvdnav.new/src/dvdnav.c
++@@ -568,6 +568,13 @@
++ 
++   /* did we hop? */
++   if(this->position_current.hop_channel != this->position_next.hop_channel) {
+++    /* We jumped to a new position: a pending request to skip the still (or
+++     * the sync wait) of the previous position must not apply to the new
+++     * one. Otherwise e.g. dvdnav_still_skip() + dvdnav_title_play() followed
+++     * by a menu call before the end of the first cell skips the menu's
+++     * still frame, and playback stops at the end of the menu PGC. */
+++    this->skip_still = 0;
+++    this->sync_wait_skip = 0;
++     (*event) = DVDNAV_HOP_CHANNEL;
++ #ifdef LOG_DEBUG
++     Log3(this->vm, "HOP_CHANNEL");
+diff --git a/contrib/src/dvdnav/rules.mak b/contrib/src/dvdnav/rules.mak
+index 96a30ba..9daed8d 100644
+--- a/contrib/src/dvdnav/rules.mak
++++ b/contrib/src/dvdnav/rules.mak
+@@ -21,6 +21,7 @@ $(TARBALLS)/libdvdnav-$(LIBDVDNAV_VERSION).tar.bz2:
+ 
+ dvdnav: libdvdnav-$(LIBDVDNAV_VERSION).tar.bz2 .sum-dvdnav
+ 	$(UNPACK)
++	$(APPLY) $(SRC)/dvdnav/0001-reset-still-skip-on-hop.patch
+ 	$(call pkg_static,"misc/dvdnav.pc.in")
+ 	$(MOVE)
+ 
+-- 
+2.43.0
+

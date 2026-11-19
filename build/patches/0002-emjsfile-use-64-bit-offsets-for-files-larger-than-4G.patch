@@ -1,0 +1,59 @@
+From 9e0166e41d69444407f5666d5da48fd08d692804 Mon Sep 17 00:00:00 2001
+From: web-dvd-player <web-dvd-player@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 16:14:26 +0000
+Subject: [PATCH 02/10] emjsfile: use 64-bit offsets for files larger than
+ 4GiB, fix EOF clamp
+
+---
+ modules/access/emjsfile.c | 28 ++++++++++++++++++----------
+ 1 file changed, 18 insertions(+), 10 deletions(-)
+
+diff --git a/modules/access/emjsfile.c b/modules/access/emjsfile.c
+index 9123a4f..59078e3 100644
+--- a/modules/access/emjsfile.c
++++ b/modules/access/emjsfile.c
+@@ -40,23 +40,31 @@ typedef struct
+ static ssize_t Read (stream_t *p_access, void *buffer, size_t size) {
+     access_sys_t *p_sys = p_access->p_sys;
+ 
+-    size_t offset = p_sys->offset;
+-    size_t js_file_size = p_sys->js_file_size; 
++    /* Keep 64-bit offsets: DVD images are commonly larger than 4GiB and
++     * size_t is 32-bit on wasm32. Offsets are passed to JS as doubles,
++     * which are exact up to 2^53. */
++    uint64_t offset = p_sys->offset;
++    uint64_t js_file_size = p_sys->js_file_size;
+ 
+     if (offset >= js_file_size)
+         return 0;
+-    if (size > offset + js_file_size) {
++    if (size > js_file_size - offset)
+         size = js_file_size - offset;
+-    }
+-    EM_ASM({
++
++    int read = EM_ASM_INT({
+         const offset = $0;
+         const buffer = $1;
+         const size = $2;
+-        const blob = Module.vlcAccess[$3].worker_js_file.slice(offset, offset + size);
+-        HEAPU8.set(new Uint8Array(Module.vlcAccess[$3].reader.readAsArrayBuffer(blob)), buffer);
+-    }, offset, buffer, size, p_access);
+-    p_sys->offset += size;
+-    return size;
++        const acc = Module.vlcAccess[$3];
++        const blob = acc.worker_js_file.slice(offset, offset + size);
++        const data = new Uint8Array(acc.reader.readAsArrayBuffer(blob));
++        HEAPU8.set(data, buffer);
++        return data.length;
++    }, (double) offset, buffer, size, p_access);
++    if (read <= 0)
++        return 0;
++    p_sys->offset += read;
++    return read;
+ }
+ 
+ static int Seek (stream_t *p_access, uint64_t offset) {
+-- 
+2.43.0
+
